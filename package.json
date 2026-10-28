@@ -1,6 +1,6 @@
 {
   "name": "gladys-solarfocus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for the Solarfocus eco manager-touch controller (vampair heat pumps, biomass boilers) over local Modbus TCP: temperatures, heating circuits, hot water, buffers; optional mode and setpoint commands, capped hot water setpoint, stops never held back. Unofficial, not affiliated with Solarfocus.",
   "type": "module",

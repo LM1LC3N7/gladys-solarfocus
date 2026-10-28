@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
 ### Added
 
 - Solarfocus eco manager-touch over local Modbus TCP: outdoor temperature; vampair heat pump flow and
@@ -27,3 +29,6 @@ the notes of the version's GitHub Release.
   until it shows or is lifted, also after a restart, never sent to a controller no longer
   configured.
 - "Test the connection" button, docs in English and French, cover image.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-solarfocus/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-solarfocus/releases/tag/v0.1.1
