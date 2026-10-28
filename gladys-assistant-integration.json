@@ -1,177 +1,254 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "Solarfocus",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Solarfocus eco manager-touch over local Modbus TCP: circuits, hot water, heat pump; options.",
+    "fr": "Régulation Solarfocus eco manager-touch en Modbus TCP local : circuits, eau chaude, PAC."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-solarfocus:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-solarfocus/main/cover.png",
+  "categories": ["climate"],
+  "transports": ["local"],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": {
+        "en": "Your Solarfocus heating",
+        "fr": "Votre chauffage Solarfocus"
+      },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Shows the Solarfocus eco manager-touch controller (vampair heat pump, pellet or wood boiler, control centre) in Gladys through Modbus TCP (port 502) on your local network, without any cloud: outdoor temperature, heating circuits, hot water tanks, buffers, heat pump or boiler. On the display, activate Modbus TCP (Customer menu > Installer > Modbus TCP), enter its IP address and your counts below, save, then add the controller from the Discovery tab. Modes and setpoints change only if you allow the commands below; hot water never above 65 °C. Turning a circuit off and hot water \"always off\" never depend on that option (see the guide for when they can fail). Modbus TCP has no password: keep the controller on a trusted network. Never tested with a real device. Not affiliated with Solarfocus.",
+        "fr": "Affiche la régulation Solarfocus eco manager-touch (pompe à chaleur vampair, chaudière à granulés ou à bois, régulation centrale) dans Gladys par Modbus TCP (port 502) sur votre réseau local, sans cloud : température extérieure, circuits de chauffage, ballons d’eau chaude, ballons tampons, pompe à chaleur ou chaudière. Sur l’écran, activez Modbus TCP (menu client > installateur > Modbus TCP), saisissez son adresse IP et vos nombres ci-dessous, enregistrez, puis ajoutez la régulation depuis l’onglet Découverte. Modes et consignes ne changent que si vous autorisez les commandes ci-dessous ; eau chaude jamais au-dessus de 65 °C. L’arrêt d’un circuit et l’eau chaude « toujours arrêtée » ne dépendent jamais de cette option (voir le guide pour les cas d’échec). Le Modbus TCP n’a pas de mot de passe : gardez la régulation sur un réseau de confiance. Jamais testé avec un vrai appareil. Sans lien avec Solarfocus."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/LM1LC3N7/gladys-solarfocus/blob/main/docs/fr.md",
+          "label": {
+            "en": "Guide (French)",
+            "fr": "Guide (français)"
+          }
+        },
+        {
+          "url": "https://github.com/LM1LC3N7/gladys-solarfocus/blob/main/docs/en.md",
+          "label": {
+            "en": "Guide (English)",
+            "fr": "Guide (anglais)"
+          }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
-      "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
+      "key": "host",
+      "type": "string",
+      "label": {
+        "en": "IP address of the eco manager-touch",
+        "fr": "Adresse IP de l’eco manager-touch"
       },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
+      "description": {
+        "en": "An IPv4 address or a host name (port 502 unless you add one, for example 192.168.1.70:502).",
+        "fr": "Une adresse IPv4 ou un nom d’hôte (port 502 sauf si vous en ajoutez un, par exemple 192.168.1.70:502)."
+      },
+      "placeholder": {
+        "en": "192.168.1.70",
+        "fr": "192.168.1.70"
+      },
       "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "default": ""
     },
     {
-      "key": "longitude",
+      "key": "unit_id",
       "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
-      "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
+      "label": {
+        "en": "Modbus unit id",
+        "fr": "Identifiant d’unité Modbus"
       },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
-    },
-    {
-      "key": "unit",
-      "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
+      "description": {
+        "en": "The Modbus slave address of the eco manager-touch: 1.",
+        "fr": "L’adresse esclave Modbus de l’eco manager-touch : 1."
+      },
       "required": false,
-      "default": "celsius",
+      "default": 1,
+      "min": 1,
+      "max": 247
+    },
+    {
+      "key": "heat_generator",
+      "type": "select",
+      "label": {
+        "en": "Heat generator",
+        "fr": "Générateur de chaleur"
+      },
+      "description": {
+        "en": "What produces the heat: its values are read only when chosen here (a register of a generator you do not have reads 0).",
+        "fr": "Ce qui produit la chaleur : ses valeurs ne sont lues que s’il est choisi ici (un registre d’un générateur absent se lit 0)."
+      },
+      "required": false,
+      "default": "none",
       "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
+        {
+          "value": "none",
+          "label": {
+            "en": "None (control centre only)",
+            "fr": "Aucun (régulation centrale seule)"
+          }
+        },
+        {
+          "value": "vampair",
+          "label": {
+            "en": "vampair heat pump",
+            "fr": "Pompe à chaleur vampair"
+          }
+        },
+        {
+          "value": "biomass",
+          "label": {
+            "en": "Pellet, wood or combination boiler",
+            "fr": "Chaudière à granulés, à bois ou mixte"
+          }
+        }
       ]
     },
     {
-      "key": "poll_frequency",
+      "key": "heating_circuits",
       "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
+      "label": {
+        "en": "Heating circuits",
+        "fr": "Circuits de chauffage"
+      },
       "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+        "en": "How many heating circuits your installation has, 0 to 8 (numbered as on the display).",
+        "fr": "Le nombre de circuits de chauffage de votre installation, de 0 à 8 (numérotés comme sur l’écran)."
       },
       "required": false,
-      "default": 300,
-      "min": 60,
+      "default": 1,
+      "min": 0,
+      "max": 8
+    },
+    {
+      "key": "dhw_tanks",
+      "type": "number",
+      "label": {
+        "en": "Hot water tanks",
+        "fr": "Ballons d’eau chaude"
+      },
+      "description": {
+        "en": "How many hot water tanks (\"Boiler\" on the display), 0 to 4.",
+        "fr": "Le nombre de ballons d’eau chaude (« Boiler » sur l’écran), de 0 à 4."
+      },
+      "required": false,
+      "default": 1,
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "buffers",
+      "type": "number",
+      "label": {
+        "en": "Buffer tanks",
+        "fr": "Ballons tampons"
+      },
+      "description": {
+        "en": "How many buffer tanks, 0 to 4.",
+        "fr": "Le nombre de ballons tampons, de 0 à 4."
+      },
+      "required": false,
+      "default": 0,
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "allow_commands",
+      "type": "boolean",
+      "label": {
+        "en": "Allow the commands",
+        "fr": "Autoriser les commandes"
+      },
+      "description": {
+        "en": "Off by default. On: Gladys may change the mode of a heating circuit, its room setpoint (10 to 30 °C), the release mode of a hot water tank and its setpoint (20 °C to the ceiling below). Off: these commands are refused. Turning a circuit off and hot water \"always off\" never depend on this option.",
+        "fr": "Désactivé par défaut. Activé : Gladys peut changer le mode d’un circuit de chauffage, sa consigne ambiante (10 à 30 °C), le mode de libération d’un ballon d’eau chaude et sa consigne (20 °C jusqu’au plafond ci-dessous). Désactivé : ces commandes sont refusées. L’arrêt d’un circuit et l’eau chaude « toujours arrêtée » ne dépendent jamais de cette option."
+      },
+      "required": false,
+      "default": false
+    },
+    {
+      "key": "dhw_max_temperature",
+      "type": "number",
+      "label": {
+        "en": "Hot water ceiling (°C)",
+        "fr": "Plafond d’eau chaude (°C)"
+      },
+      "description": {
+        "en": "The highest hot water setpoint Gladys may send, 20 to 65 °C (65 °C by default). Nothing above 65 °C is ever sent, whatever is typed here.",
+        "fr": "La consigne d’eau chaude la plus haute que Gladys peut envoyer, de 20 à 65 °C (65 °C par défaut). Rien au-dessus de 65 °C n’est jamais envoyé, quoi qu’il soit saisi ici."
+      },
+      "required": false,
+      "default": 65,
+      "min": 20,
+      "max": 65
+    },
+    {
+      "key": "poll_interval",
+      "type": "number",
+      "label": {
+        "en": "Refresh interval (s)",
+        "fr": "Intervalle de rafraîchissement (s)"
+      },
+      "description": {
+        "en": "How often the controller is read, in seconds.",
+        "fr": "Fréquence de lecture de la régulation, en secondes."
+      },
+      "required": false,
+      "default": 60,
+      "min": 30,
       "max": 3600
+    },
+    {
+      "key": "language",
+      "type": "select",
+      "label": {
+        "en": "Language of the feature names",
+        "fr": "Langue des noms des fonctionnalités"
+      },
+      "description": {
+        "en": "Used for the names of the device and features added from now on, the status and the command errors.",
+        "fr": "Sert aux noms de l’appareil et des fonctionnalités ajoutés désormais, au statut et aux erreurs des commandes."
+      },
+      "required": false,
+      "default": "fr",
+      "options": [
+        {
+          "value": "fr",
+          "label": {
+            "en": "French",
+            "fr": "Français"
+          }
+        },
+        {
+          "value": "en",
+          "label": {
+            "en": "English",
+            "fr": "Anglais"
+          }
+        }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
-    },
-    {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
-    }
-  ],
-  "scene_triggers": [
-    {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
-      "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
+      "key": "test_connection",
+      "label": {
+        "en": "Test the connection",
+        "fr": "Tester la connexion"
       },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
-        },
-        {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
-          "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
-          ]
-        }
-      ],
-      "variables": [
-        {
-          "key": "target",
-          "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
-        }
-      ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
       "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
+        "en": "Reads the controller once (never sooner than the refresh interval) and shows its state.",
+        "fr": "Lit la régulation une fois (jamais avant l’intervalle de rafraîchissement) et affiche son état."
       },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
+      "timeout_seconds": 60
     }
   ]
 }

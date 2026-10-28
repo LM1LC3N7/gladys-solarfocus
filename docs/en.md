@@ -1,61 +1,152 @@
-# Demo Devices Template
+# Solarfocus eco manager-touch controller
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+This integration shows your Solarfocus heating driven by the **eco manager-touch** controller
+(vampair heat pump, pellet or wood boiler, control centre) in Gladys, through its **Modbus TCP**
+interface on your local network, without any cloud. If you allow it, it can also change the modes and
+the setpoints.
 
-## What you get
+> **Never tested with a real device.** The integration follows Solarfocus's Modbus TCP document
+> (DR-0180-DE, version v14-260212), the `aiosolarfocus` library and the Home Assistant integration
+> `home-assistant-solarfocus`, and was tested against a simulated controller only.
+> Not affiliated with Solarfocus GmbH.
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+## What you need
+
+- An **eco manager-touch** controller with the 7-inch display (vampair, therminator II touch,
+  pelletelegance, octoplus, pellettop touch or control centre; software 19.050 or newer). The
+  registers used are those of the current software (26.020); on older software, those it lacks are
+  simply not read.
+- **Modbus TCP activated**, once: customer menu → installer (spanner) → "Modbus TCP", parameter
+  "Modbus TCP" set to 1; "Interface activated" turns green. Solarfocus notes that once the interface
+  is active, the modes can no longer be set from the mySOLARFOCUS app.
+- For the room setpoint sent by Gladys to count, **room influence** must be enabled on the display
+  for the circuit.
+- A fixed IP address for the controller (reserve it in your router).
+- Modbus TCP has **no password**: any device on your network can read and write the heating
+  settings. Keep the controller on a **trusted network**, never exposed to the Internet.
 
 ## Configuration
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+| Field              | Role                                                                          |
+| ------------------ | ----------------------------------------------------------------------------- |
+| IP address         | IPv4 or host name, port 502 unless you add one (`192.168.1.70:502`).          |
+| Modbus unit id     | 1 on an eco manager-touch.                                                    |
+| Heat generator     | None, vampair heat pump, or pellet / wood / combination boiler.               |
+| Heating circuits   | How many, 0 to 8 (1 by default), numbered as on the display.                  |
+| Hot water tanks    | How many, 0 to 4 (1 by default); "Boiler" on the display.                     |
+| Buffer tanks       | How many, 0 to 4 (0 by default).                                              |
+| Allow the commands | Off by default (see below).                                                   |
+| Hot water ceiling  | The highest hot water setpoint Gladys may send: 65 °C by default, 65 at most. |
+| Refresh interval   | 60 s by default, 30 s to 1 h.                                                 |
+| Language           | Language of the device names, the status and the messages.                    |
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+The controller answers for every component its software knows, even those you do not have: that is
+why the integration asks for the generator and the counts of circuits and tanks. Save, then add the
+controller from the **Discovery** tab. The "Test the connection" button reads the controller again,
+never more often than the interval.
 
-## Actions
+## What you see
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+- The outdoor temperature.
+- With a vampair heat pump: flow and return temperatures, utility lock (EVU) active or not; with
+  software 25.030 or newer, its state (standby, heating, hot water, cooling, locks…) and its
+  electrical power (W).
+- With a pellet or wood boiler: the boiler temperature.
+- For each configured circuit: mode (continuous, setback, automatic, off), room setpoint, flow and
+  room temperatures.
+- For each hot water tank: release mode (always off, always on, programs), setpoint and temperature.
+- For each buffer tank: top and bottom temperatures.
 
-## Scenes
+A measurement feature appears only once a value of it was read. Never published as measurements: the
+values of an unplugged sensor (130.0, 270.0 or 350.0 °C), a temperature of exactly 0.0 °C (what an
+absent component reads; except outdoors, where 0.0 °C is real), a room setpoint of 0 (no setpoint from
+Modbus), a mode or state outside Solarfocus's list, a value out of range. Energy counters are not
+published yet.
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+## The commands
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+Off by default. With "Allow the commands", Gladys may change:
 
-## Dashboard
+- the **mode of a circuit** in the configuration (continuous, setback, automatic);
+- the **room setpoint** of a circuit, 10 to 30 °C by 0.5 °C (Solarfocus accepts 5 to 45 °C);
+- the **release mode of a hot water tank** (always on, Monday-Sunday program, by blocks, day by day);
+- the **hot water setpoint**, by 0.5 °C, from 20 °C to the ceiling of the configuration (65 °C by
+  default). **Nothing above 65 °C is ever sent**, whatever is typed.
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+A circuit mode is written the way Solarfocus asks (§ 6.2 of its document: all the registers of the
+circuit together): flow setpoint 0 (the controller's heating curve applies), cooling 0, the
+heating/cooling mode as read (software 22.090 or newer; older software has none), then the mode. The
+integration **never** sends a flow setpoint and **never** switches a circuit to cooling: the
+controller's dew point monitoring stays active. If another Modbus client (Loxone…) wrote a flow
+setpoint on a circuit, Gladys does not change its mode (the status says so); a stop still goes.
 
-## Troubleshooting
+Each command first reads the current values on the controller, writes nothing if they are already
+right, then reads back what it wrote: it succeeds only if the read back shows the value asked.
+Otherwise Gladys answers "sent, without confirmation" and reads the controller again 5 s, 25 s and
+60 s later.
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+A command is refused, with nothing sent, when: the option is off (also checked right before each
+write), the value is out of range or above the ceiling, the circuit or tank is not in the
+configuration, the current value could not be read, a flow setpoint of another client is active
+(circuit mode), the configuration changed meanwhile, a stop was sent after it arrived, or 16 commands
+are already waiting. If the option is turned off between two writes of a circuit, the mode is not
+written (the writes already sent change nothing in the operation: 0 on a flow setpoint already at
+0, and the cooling flag acts only with a flow setpoint).
+
+Commands go one at a time, in their order of arrival, on a single connection. A scene setting several
+values sets them all: a command waiting its turn beyond 3.5 s is answered "waiting" and is sent within
+15 s of the click, or not at all.
+
+## The stops
+
+Turning a circuit **Off** (frost protection only) or a tank **Always off** **never** depends on the
+command option, the bounds, a read in progress or failed, a controller not read yet, a command
+waiting, nor on `/data` that cannot be written. A stop goes before everything; every command that
+arrived before it and has not left is dropped. Turning a circuit off writes what Solarfocus documents
+(§ 6.2.3), the mode first: mode 3, flow setpoint 0, cooling 0, then the heating/cooling mode last read
+(2, the document's value, when never read; nothing on software without it). A refused connection is
+tried again every 250 ms for 3 s; Gladys gets its answer within 3.5 s.
+
+A stop not confirmed is kept in `/data` with the values read before it. The integration checks the
+controller every 15 s, whatever the refresh interval: a stop that could not leave is tried again at
+each check; a stop written but not showing yet is sent again (3 times at most, at least 20 s after
+it was sent) while the controller shows a value of before. After those 3 resends, the controller is
+read every 5 minutes, without writing, and the status shows "Stop not confirmed" until the stop shows
+or the guard is lifted. This guard is **never** lifted by the time, only:
+
+- by a read showing the stop (two reads in a row, after the time to apply it, when a command sent
+  before the stop could still land);
+- by a newer Gladys command on the same setting that left (a click, with the option);
+- by another value, read twice in a row, set at the display or by another client: it is never
+  overridden. For a stop clicked before any read, the first value read after it counts as the value of
+  before; an unknown value of before never counts as "changed elsewhere".
+
+A check never interrupts a command: it waits behind the commands (newer than it) and never writes over
+them; a new click on a stop interrupts a check and is written then read back like a first click. After a restart,
+the check starts at once, before the configuration is even read.
+
+A stop can fail or not be sent again in these cases:
+
+- no valid address in the configuration (or, before the configuration is read, no controller read
+  before): refused, nothing sent;
+- the controller stays unreachable for 3 s: "not sent", then tried again every 15 s (and at a
+  restart);
+- the controller answers a Modbus exception on the mode register: "refused" or "sent, without
+  confirmation" depending on the code (an exception on the other registers of the circuit is logged,
+  the stop goes on);
+- the read back does not show the stop yet: "sent, without confirmation";
+- it is no longer sent again after another value read twice in a row, a newer Gladys command that
+  left, or 3 resends;
+- `/data` holds a stop clicked "in the future" (clock set back): it is invalid and not replayed;
+  unreadable `/data` is never overwritten (the stops it holds are then lost for that start).
+
+Gladys never turns the heating back on by itself.
+
+## Known limits
+
+- No serial number over Modbus: the device is tied to the integration, not to the IP address
+  (changing the address keeps the device and its history), and another Modbus device at the same
+  address would not be detected.
+- Not supported yet: energy counters, solar, fresh water modules, circulation, photovoltaics, detailed
+  states of circuits, tanks and boilers, one-time hot water charge, external outdoor or room
+  temperature, SG Ready and utility lock.

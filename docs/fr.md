@@ -1,67 +1,163 @@
-# Template de démonstration
+# Régulation Solarfocus eco manager-touch
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Cette intégration affiche votre chauffage Solarfocus piloté par la régulation **eco manager-touch**
+(pompe à chaleur vampair, chaudière à granulés ou à bois, régulation centrale) dans Gladys, par son
+interface **Modbus TCP** sur votre réseau local, sans cloud. Elle peut aussi, si vous l’autorisez,
+changer les modes et les consignes.
 
-## Ce que vous obtenez
+> **Jamais testé avec un vrai appareil.** L’intégration suit la documentation Modbus TCP de Solarfocus
+> (DR-0180-DE, version v14-260212), la bibliothèque `aiosolarfocus` et l’intégration Home Assistant
+> `home-assistant-solarfocus`, et a été testée contre une régulation simulée seulement.
+> Sans lien avec Solarfocus GmbH.
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+## Ce qu’il faut
+
+- Une régulation **eco manager-touch** à écran 7 pouces (vampair, therminator II touch,
+  pelletelegance, octoplus, pellettop touch ou régulation centrale ; logiciel 19.050 ou plus récent).
+  Les registres utilisés sont ceux du logiciel actuel (26.020) ; sur un logiciel plus ancien, ceux qui
+  manquent ne sont simplement pas lus.
+- Le **Modbus TCP activé**, une fois pour toutes : menu client → installateur (clé plate) →
+  « Modbus TCP », paramètre « Modbus TCP » sur 1 ; « Interface activée » passe au vert. Solarfocus
+  précise qu’une fois l’interface activée, les modes ne se règlent plus depuis l’application
+  mySOLARFOCUS.
+- Pour que la consigne ambiante envoyée par Gladys compte, l’**influence de la pièce** doit être
+  activée sur l’écran pour le circuit.
+- Une adresse IP fixe pour la régulation (réservez-la dans votre box).
+- Le Modbus TCP n’a **pas de mot de passe** : n’importe quel appareil de votre réseau peut lire et
+  écrire les réglages du chauffage. Gardez la régulation sur un **réseau de confiance**, jamais exposée
+  à Internet.
 
 ## Configuration
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+| Champ                          | Rôle                                                                                           |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- |
+| Adresse IP                     | IPv4 ou nom d’hôte, port 502 sauf si vous en ajoutez un (`192.168.1.70:502`).                  |
+| Identifiant d’unité Modbus     | 1 sur une eco manager-touch.                                                                   |
+| Générateur de chaleur          | Aucun, pompe à chaleur vampair, ou chaudière à granulés / bois / mixte.                        |
+| Circuits de chauffage          | Leur nombre, de 0 à 8 (1 par défaut), numérotés comme sur l’écran.                             |
+| Ballons d’eau chaude           | Leur nombre, de 0 à 4 (1 par défaut) ; « Boiler » sur l’écran.                                 |
+| Ballons tampons                | Leur nombre, de 0 à 4 (0 par défaut).                                                          |
+| Autoriser les commandes        | Désactivé par défaut (voir plus bas).                                                          |
+| Plafond d’eau chaude (°C)      | La consigne d’eau chaude la plus haute que Gladys peut envoyer : 65 °C par défaut, 65 au plus. |
+| Intervalle de rafraîchissement | 60 s par défaut, de 30 s à 1 h.                                                                |
+| Langue                         | Langue des noms de l’appareil, du statut et des messages.                                      |
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+La régulation répond pour tous les composants que son logiciel connaît, même ceux que vous n’avez
+pas : c’est pourquoi l’intégration vous demande le générateur et les nombres de circuits et de ballons.
+Enregistrez, puis ajoutez la régulation depuis l’onglet **Découverte**. Le bouton « Tester la
+connexion » relit la régulation, jamais plus souvent que l’intervalle.
 
-## Actions
+## Ce que vous voyez
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+- La température extérieure.
+- Avec une pompe à chaleur vampair : températures de départ et de retour, blocage fournisseur (EVU)
+  actif ou non ; avec un logiciel 25.030 ou plus récent, son état (veille, chauffage, eau chaude,
+  rafraîchissement, blocages…) et sa puissance électrique (W).
+- Avec une chaudière à granulés ou à bois : la température de la chaudière.
+- Pour chaque circuit configuré : mode (permanent, réduit, automatique, arrêt), consigne ambiante,
+  températures de départ et ambiante.
+- Pour chaque ballon d’eau chaude : mode de libération (toujours arrêté, toujours en marche,
+  programmes), consigne et température.
+- Pour chaque ballon tampon : températures haut et bas.
 
-## Scènes
+Une fonctionnalité de mesure n’apparaît qu’une fois qu’une valeur en a été lue. Ne sont jamais publiées
+comme des mesures : les valeurs d’un capteur non branché (130,0, 270,0 ou 350,0 °C), une température
+d’exactement 0,0 °C (ce que lit un composant absent ; sauf la température extérieure, où 0,0 °C est
+réel), une consigne ambiante 0 (aucune consigne venue du Modbus), un mode ou un état hors de la liste de
+Solarfocus, une valeur hors plage. Les compteurs d’énergie ne sont pas encore publiés.
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+## Les commandes
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+Désactivées par défaut. Avec « Autoriser les commandes », Gladys peut changer :
 
-## Tableau de bord
+- le **mode d’un circuit** configuré (permanent, réduit, automatique) ;
+- la **consigne ambiante** d’un circuit, de 10 à 30 °C par pas de 0,5 °C (Solarfocus accepte 5 à
+  45 °C) ;
+- le **mode de libération d’un ballon** d’eau chaude (toujours en marche, programme lundi-dimanche, par
+  blocs, jour par jour) ;
+- la **consigne d’eau chaude**, par pas de 0,5 °C, de 20 °C au plafond de la configuration (65 °C par
+  défaut). **Rien au-dessus de 65 °C n’est jamais envoyé**, quoi qu’il soit saisi.
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
+Le mode d’un circuit s’écrit comme Solarfocus le demande (§ 6.2 de sa documentation : tous les
+registres du circuit ensemble) : consigne de départ 0 (la courbe de chauffe de la régulation
+s’applique), rafraîchissement 0, mode chauffage/rafraîchissement tel que relu (logiciel 22.090 ou plus
+récent ; un logiciel plus ancien n’en a pas), puis le mode. L’intégration n’envoie **jamais** de
+consigne de départ et ne met **jamais** un circuit en rafraîchissement : la surveillance du point de
+rosée de la régulation reste active. Si un autre client Modbus (Loxone…) a écrit une consigne de départ
+sur un circuit, Gladys n’en change pas le mode (le statut le signale) ; l’arrêt, lui, part quand même.
 
-## Dépannage
+Chaque commande relit d’abord les valeurs actuelles sur la régulation, n’écrit rien si elles sont déjà
+les bonnes, puis relit ce qu’elle a écrit : elle n’est réussie que si la relecture montre la valeur
+demandée. Sinon Gladys répond « envoyée, sans confirmation » et relit la régulation 5 s, 25 s et 60 s
+après.
 
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+Une commande est refusée, sans rien envoyer, quand : l’option est désactivée (vérifiée aussi juste
+avant chaque écriture), la valeur est hors limites ou au-dessus du plafond, le circuit ou le ballon
+n’est pas dans la configuration, la valeur actuelle n’a pas pu être relue, une consigne de départ d’un
+autre client est active (mode d’un circuit), la configuration a changé entre-temps, un arrêt a été
+envoyé après son arrivée, ou 16 commandes attendent déjà. Si l’option est désactivée entre deux
+écritures d’un circuit, le mode n’est pas écrit (les écritures déjà parties ne changent pas le
+fonctionnement : 0 sur une consigne de départ déjà à 0, et le rafraîchissement n’agit qu’avec une
+consigne de départ).
+
+Les commandes passent une par une, dans leur ordre d’arrivée, sur une seule connexion. Une scène qui
+règle plusieurs valeurs les règle toutes : une commande qui attend son tour au-delà de 3,5 s reçoit la
+réponse « en attente » et part dans les 15 s qui suivent le clic, ou pas du tout.
+
+## Les arrêts
+
+Mettre un circuit sur **Arrêt** (hors gel seulement) ou un ballon sur **Toujours arrêté** ne dépend
+**jamais** de l’option des commandes, ni des limites, ni d’une lecture en cours ou en échec, ni d’une
+régulation pas encore lue, ni d’une commande en attente, ni de `/data` impossible à écrire. Un arrêt
+passe devant tout ; toutes les commandes arrivées avant lui et pas encore parties sont abandonnées.
+L’arrêt d’un circuit écrit ce que Solarfocus documente (§ 6.2.3), le mode d’abord : mode 3, consigne de
+départ 0, rafraîchissement 0, puis le mode chauffage/rafraîchissement dernier lu (2, la valeur de la
+documentation, s’il n’a jamais été lu ; rien sur un logiciel qui n’en a pas). Une connexion refusée est
+réessayée toutes les 250 ms pendant 3 s ; Gladys a sa réponse en 3,5 s au plus.
+
+Un arrêt non confirmé est gardé dans `/data` avec les valeurs lues avant lui. L’intégration vérifie la
+régulation toutes les 15 s, quel que soit l’intervalle de rafraîchissement : un arrêt qui n’a pas pu
+partir est retenté à chaque vérification ; un arrêt écrit mais pas encore visible est renvoyé (3 fois
+au plus, 20 s au moins après l’envoi) tant que la régulation montre une valeur d’avant. Après ces 3
+renvois, la régulation est relue toutes les 5 minutes, sans écrire, et le statut affiche « Arrêt non
+confirmé » jusqu’à ce que l’arrêt se voie ou que la garde soit levée. Cette garde n’est **jamais**
+levée par le temps, seulement :
+
+- par une lecture qui montre l’arrêt (deux lectures de suite, après le délai d’application, si une
+  commande envoyée avant l’arrêt pouvait encore arriver) ;
+- par une commande plus récente de Gladys sur le même réglage, partie (un clic, avec l’option) ;
+- par une autre valeur, lue deux fois de suite, mise depuis l’écran ou un autre client : elle n’est
+  jamais écrasée. Pour un arrêt cliqué avant toute lecture, la première valeur relue après lui compte
+  comme valeur d’avant ; une valeur d’avant inconnue ne vaut jamais « changé ailleurs ».
+
+Une vérification n’interrompt jamais une commande : elle attend derrière les commandes (plus récentes
+qu’elle) et n’écrit jamais par-dessus ; un nouveau clic sur un arrêt interrompt une vérification et est
+écrit puis relu comme un premier clic. Après un redémarrage, la vérification part aussitôt, avant même de lire la
+configuration.
+
+Un arrêt peut échouer ou ne pas être renvoyé dans ces cas :
+
+- aucune adresse valide dans la configuration (ou, avant que la configuration soit lue, aucune
+  régulation lue auparavant) : refusé, rien n’est envoyé ;
+- la régulation reste injoignable pendant 3 s : « non envoyé », puis retenté toutes les 15 s (et au
+  redémarrage) ;
+- la régulation répond une exception Modbus sur le registre du mode : « refusée » ou « envoyée, sans
+  confirmation » selon le code (une exception sur les autres registres du circuit est notée dans le
+  journal, l’arrêt continue) ;
+- la relecture ne montre pas encore l’arrêt : « envoyée, sans confirmation » ;
+- il n’est plus renvoyé après une autre valeur lue deux fois de suite, une commande plus récente de
+  Gladys partie, ou 3 renvois ;
+- `/data` contient un arrêt cliqué « dans le futur » (horloge revenue en arrière) : il est invalide et
+  n’est pas rejoué ; `/data` illisible n’est jamais écrasé (les arrêts qu’il contient sont alors
+  perdus pour ce démarrage).
+
+Gladys ne remet jamais le chauffage en marche toute seule.
+
+## Limites connues
+
+- Pas de numéro de série en Modbus : l’appareil est lié à l’intégration, pas à l’adresse IP (changer
+  d’adresse garde l’appareil et son historique), et un autre appareil Modbus à la même adresse ne
+  serait pas détecté.
+- Pas encore pris en charge : compteurs d’énergie, solaire, modules d’eau chaude instantanée,
+  circulation, photovoltaïque, états détaillés des circuits, ballons et chaudières, recharge unique
+  d’eau chaude, température extérieure ou ambiante externe, SG Ready et blocage fournisseur.
