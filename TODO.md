@@ -180,3 +180,11 @@ to date at the end of every milestone.
   turn and 60 s of its arrival.
 - No `keywords` or `countries` in the manifest (AT, DE would fit; left out
   per the lot rules). Category: `climate`.
+
+## Next patch
+
+- r3 m9: removing `this.sortGuards()` from `start` (`src/app.js:382`) fails no test; a guard put aside that
+  gets its controller back (A → B → A) is woken only by that call. Add a test.
+- r3 m10: a stop clicked before the configuration is read goes to the last controller read, even when the
+  configuration names another one that never answered (narrow window, documented). Write the applied
+  configuration's controller into `memory.target`.
