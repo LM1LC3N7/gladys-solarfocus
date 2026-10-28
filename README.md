@@ -20,7 +20,7 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (SolarfocusApp)
                                   ├─ src/model.js            special values, plausible ranges, mode texts (pure)
                                   ├─ src/devices.js          the device, its commands and states (pure)
                                   ├─ src/publisher.js        states within 300/min
-                                  └─ src/store.js            /data/solarfocus-state.json (last read, heating modes, stops)
+                                  └─ src/store.js            /data/solarfocus-state.json (last read, stops)
 ```
 
 - **Reads**: one connection per poll (every 60 s, 30 s – 1 h), functions 3 and 4 on runs of
@@ -28,22 +28,27 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (SolarfocusApp)
   values after it would shift), then closed. The test button, Discovery, a reconnection, a
   configuration saved for the same controller and a restart never read sooner than the interval
   (time kept in `/data` before the read); only a command (its fresh read, its read back) and the
-  reads 5 s, 25 s and 60 s after it do. A refused block leaves its values unknown; every block
-  refused is a failure.
+  reads 5 s, 25 s and 60 s after it do. A refused block leaves its values unknown; a block without
+  an answer is skipped and the read goes on over a new connection (twice per poll at most); every
+  block refused or silent is a failure.
 - **Device**: `ext:<selector>:solarfocus:controller` (no serial number over Modbus). Commands of the
   configured circuits and tanks always built; sensors once a value was read, or already created.
 - **Commands** (`allow_commands`, off by default): circuit mode (32603+, with 32600 = 0, 32602 = 0
   and 32608 as read, § 6.2), room setpoint (32605+, 10-30 °C), hot water setpoint (32000+, 20 °C to
-  the ceiling, 65 °C at most) and release mode (32002+). Fresh read, already-so check, function 16
+  the ceiling, 65 °C at most) and release mode (written to 32002+, read from 502+, the mode
+  applied). Fresh read, already-so check, function 16
   writes of one register (each checked against a whitelist and its bounds in `writeRequest`), echo
   and read back; one at a time in order on one session (a scene sets them all).
-- **Stops** (protective): circuit off (§ 6.2.3, mode first) and hot water always off; never behind
-  the option, the bounds, a read or a command; drop every command that arrived before; retried for
-  3 s; kept in `/data` with the values of before, checked every 15 s whatever the interval (three
-  resends at most), never lifted by the time (only a read showing it, a newer command that left, or
-  another value read twice in a row), also at a restart before the configuration is read. One lock
-  for the line: a session opens only once the previous one is closed (FIN, then the controller's
-  close, 500 ms at most).
+- **Stops** (protective): circuit off (§ 6.2.3, mode first, then the heating mode read and written
+  back; confirmed by mode 3, flow setpoint 0 and cooling 0) and hot water always off (confirmed on
+  502); never behind the option, the bounds, a read or a command; drop every command that arrived
+  before; retried for 3 s from the start of their turn (refused or closed connection, timeout, wrong
+  answer, Modbus exception 4-6, a refused register of the group); in `/data` before the first write,
+  checked every 15 s whatever the interval (three acknowledged resends at most), never lifted by the
+  time (only a read showing it, a newer command that left, or another value read twice in a row),
+  also at a restart before the configuration is read; never checked nor written on a controller no
+  longer configured (shown in the status). One lock for the line: a session opens only once the
+  previous one is closed (FIN, then the controller's close, 500 ms at most).
 
 ## Development
 

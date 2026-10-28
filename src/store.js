@@ -4,9 +4,8 @@
 //   - the time of the last read of the controller (written at most once a
 //     minute, BEFORE the read), so a restart never reads it sooner than the
 //     interval;
-//   - the controller of the last read (address, port, unit id) and, for each
-//     heating circuit, its heating mode (32608) last read, or that this
-//     firmware has none: what a stop writes there without reading first;
+//   - the controller of the last read (address, port, unit id): where a stop
+//     goes while the configuration is not read;
 //   - the stops not confirmed yet (a heating circuit off, a hot water tank
 //     always off): their target, register, when they were clicked, the
 //     values read before them, how many times they were sent again. They are
@@ -145,24 +144,10 @@ function normalizeStop(raw, now) {
 }
 
 /**
- * The heating modes (32608) last read, by circuit number: 0-2, or 'absent'
- * (the firmware refused the register: older than 22.090).
- */
-function normalizeHeatingModes(raw) {
-  const modes = {};
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return modes;
-  for (let n = 1; n <= MAX_COUNTS.circuits; n += 1) {
-    const value = raw[n];
-    if (value === 'absent' || intIn(value, 0, 2) !== undefined) modes[n] = value;
-  }
-  return modes;
-}
-
-/**
  * The persisted state, repaired and bounded:
  * - `lastAttemptAt`: wall time of the last read, or null (a time in the
  *   future counts as now: never a longer wait than the interval);
- * - `target`: the controller of the last read, and `heatingModes` read there;
+ * - `target`: the controller of the last read;
  * - `stops`: the stops not confirmed.
  */
 export function normalizeMemory(raw, now) {
@@ -176,7 +161,6 @@ export function normalizeMemory(raw, now) {
   const target = normalizeTarget(data.target);
   return {
     target,
-    heatingModes: target ? normalizeHeatingModes(data.heatingModes) : {},
     lastAttemptAt: Number.isFinite(data.lastAttemptAt) ? Math.min(data.lastAttemptAt, now) : null,
     stops,
   };

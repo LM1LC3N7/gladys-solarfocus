@@ -36,9 +36,11 @@ import {
   FEATURES as F,
   MAX_COUNTS,
   bufferRole,
+  circuitControlBlocks,
   circuitHolding,
   circuitRole,
   dhwHolding,
+  dhwInput,
   dhwRole,
 } from './constants.js';
 import {
@@ -177,46 +179,67 @@ export function parseFeatureId(externalId) {
   return match && ROLES.has(match[1]) ? match[1] : undefined;
 }
 
+const holdingPoint = (key, address) => ({ key, fc: 3, points: [[address, 't', key]] });
+
 /**
  * The commands, by role: `kind` (circuitMode, room, dhw, dhwMode), the
- * component, the register that holds the value (`register`) and the value
- * key read back (`read`); a select has its `table` and its `protective`
- * choice (the one that stops).
+ * component, the register written with the value (`register`), the value
+ * key decided on and read back (`read`) and the blocks it is read from
+ * (`blocks`); a select has its `table` and its `protective` choice (the one
+ * that stops), and the blocks that confirm a stop (`stopBlocks`).
  */
 export function commandOf(role) {
   const entry = ROLES.get(role);
   if (!entry?.kind) return undefined;
   const { kind, n, suffix } = entry;
   if (kind === 'circuit' && suffix === CF.MODE) {
+    const blocks = circuitControlBlocks(n);
     return {
       kind: 'circuitMode',
       component: 'circuit',
       n,
       register: circuitHolding(n) + 3,
       read: entry.value,
+      blocks,
+      // A circuit off is confirmed by its mode, flow setpoint and cooling (§ 6.2.3).
+      stopBlocks: blocks.filter((b) => !b.optional),
       table: CIRCUIT_MODES,
       protective: 'off',
     };
   }
   if (kind === 'circuit' && suffix === CF.SETPOINT) {
+    const register = circuitHolding(n) + 5;
     return {
       kind: 'room',
       component: 'circuit',
       n,
-      register: circuitHolding(n) + 5,
+      register,
       read: entry.value,
+      blocks: [holdingPoint(entry.value, register)],
     };
   }
   if (kind === 'dhw' && suffix === DF.SETPOINT) {
-    return { kind: 'dhw', component: 'dhw', n, register: dhwHolding(n), read: entry.value };
+    const register = dhwHolding(n);
+    return {
+      kind: 'dhw',
+      component: 'dhw',
+      n,
+      register,
+      read: entry.value,
+      blocks: [holdingPoint(entry.value, register)],
+    };
   }
   if (kind === 'dhw' && suffix === DF.MODE) {
+    // Written to 32002 ("Soll"), read from 502 ("Ist"): what the controller applies.
+    const blocks = [{ key: `dhw-${n}-mode`, fc: 4, points: [[dhwInput(n) + 2, 'u', entry.value]] }];
     return {
       kind: 'dhwMode',
       component: 'dhw',
       n,
       register: dhwHolding(n) + 2,
       read: entry.value,
+      blocks,
+      stopBlocks: blocks,
       table: DHW_MODES,
       protective: 'always-off',
     };

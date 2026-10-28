@@ -83,7 +83,6 @@ test('/data: repaired and bounded; a stop clicked in the future is invalid', () 
         { ...target, register: 32002, at: now, before: ['always-on', 'automatic'] },
       ],
       target,
-      heatingModes: { 1: 2, 2: 'absent', 3: 7, 9: 1 },
     },
     now,
   );
@@ -96,10 +95,8 @@ test('/data: repaired and bounded; a stop clicked in the future is invalid', () 
   assert.deepEqual(m.stops[0].before, ['automatic', 'setback']);
   assert.deepEqual(m.stops[1].before, ['always-on'], 'values of its own table only');
   assert.deepEqual(m.target, target);
-  assert.deepEqual(m.heatingModes, { 1: 2, 2: 'absent' });
   assert.deepEqual(normalizeMemory('garbage', now), {
     target: null,
-    heatingModes: {},
     lastAttemptAt: null,
     stops: [],
   });

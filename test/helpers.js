@@ -71,8 +71,14 @@ export async function setup({
     await app.boot();
   }
   const connecting = gladys.connect();
+  let connected = false;
+  connecting.then(() => {
+    connected = true;
+  });
   await settle();
   await advance(500);
+  // A first read with blocks in timeout takes a few (virtual) seconds.
+  for (let i = 0; i < 400 && !connected; i += 1) await advance(50);
   await connecting;
   await advance(1500);
   if (create && gladys.fake.discoveredDevices.length > 0) {

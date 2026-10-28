@@ -77,7 +77,6 @@ import {
   NOT_APPLIED_EXCEPTIONS,
   SECOND,
   TIMINGS,
-  circuitControlBlocks,
   circuitHolding,
   dhwHolding,
   pollBlocks,
@@ -91,7 +90,7 @@ import {
   rolesToBuild,
   rolesWithValues,
 } from './devices.js';
-import { ERRORS, T, age, join, word } from './i18n.js';
+import { ERRORS, T, age, componentName, join, reasonOf, word } from './i18n.js';
 import { interpret } from './model.js';
 import { ERROR_KINDS, ModbusError, errorReason, openSession, tcpConnect } from './modbus/client.js';
 import {
@@ -127,8 +126,15 @@ const monotonic = () => performance.now();
 const sameTarget = (a, b) =>
   Boolean(a && b) && a.host === b.host && a.port === b.port && a.unitId === b.unitId;
 
-/** The block of one register (the read back of a single-register command). */
-const pointBlock = (key, address, type) => ({ key, fc: 3, points: [[address, type, key]] });
+/**
+ * What a read shows of a circuit stopped by halves: mode 3 without its flow
+ * setpoint and cooling at 0 (§ 6.2.3 not complete). Never a mode key.
+ */
+const PARTIAL = 'off-incomplete';
+
+/** The key of a stop guard: its controller and its register. */
+export const guardKey = (target, register) =>
+  `${target.host}:${target.port}:${target.unitId}:${register}`;
 
 /** The heating circuit (1-8) of a holding register of its block, else undefined. */
 const circuitOf = (register) => {
@@ -268,12 +274,13 @@ export class SolarfocusApp {
   }
 
   /** The stops not confirmed, in /data. */
+  /** The stops not confirmed, in /data. */
   persistStops() {
     const stops = [];
-    for (const [register, g] of this.stopGuards) {
+    for (const g of this.stopGuards.values()) {
       stops.push({
         ...g.target,
-        register,
+        register: g.register,
         at: g.at,
         written: g.written,
         reasserts: g.reasserts,
@@ -286,30 +293,12 @@ export class SolarfocusApp {
     }
     this.memory.stops = stops;
     this.saveMemory().catch(() => {});
+    // The status lists the stops not confirmed.
+    if (this.started) this.updateStatus().catch(() => {});
   }
 
   /** The heating mode (32608) last read on circuit `n` of `target`: 0-2, 'absent' or undefined. */
-  heatingModeFor(n, target) {
-    return sameTarget(target, this.memory.target) ? this.memory.heatingModes?.[n] : undefined;
-  }
-
   /** Keeps the heating modes read (and those the firmware has not) for the stops. */
-  noteHeatingModes(values, target) {
-    if (!sameTarget(target, this.memory.target)) {
-      return;
-    }
-    const modes = { ...this.memory.heatingModes };
-    for (let n = 1; n <= MAX_COUNTS.circuits; n += 1) {
-      const value = values[`circuit.${n}.heatingMode`];
-      if (value !== undefined) modes[n] = value;
-      if (this.absent.has(`circuit-${n}-heating-mode`)) modes[n] = 'absent';
-    }
-    if (JSON.stringify(modes) !== JSON.stringify(this.memory.heatingModes)) {
-      this.memory.heatingModes = modes;
-      this.saveMemory().catch(() => {});
-    }
-  }
-
   /**
    * At the start of the container, before the configuration is read: the
    * stops kept in /data (not confirmed before the restart) are checked at
@@ -325,7 +314,7 @@ export class SolarfocusApp {
         continue;
       }
       const target = { host: kept.host, port: kept.port, unitId: kept.unitId };
-      const guard = this.ensureStopGuard(kept.register, plan, target);
+      const guard = this.ensureStopGuard(plan, target);
       Object.assign(guard, {
         at: kept.at,
         before: [...kept.before],
@@ -338,7 +327,7 @@ export class SolarfocusApp {
       this.logger.warn(
         `Solarfocus: a stop kept in /data (register ${kept.register}) is checked again after the restart`,
       );
-      this.runCheck(kept.register).catch((err) =>
+      this.runCheck(guard.key).catch((err) =>
         this.logger.warn(`Solarfocus: check after the restart: ${err.message}`),
       );
     }
@@ -384,6 +373,7 @@ export class SolarfocusApp {
     this.badge = undefined;
     this.lastStatus = undefined;
     this.publisher.start();
+    this.wakeGuards();
     if (!this.config.address) {
       // The device already created is shown unreachable.
       await this.publishAll();
@@ -547,6 +537,7 @@ export class SolarfocusApp {
 
   configUpdated(raw = {}) {
     return this.applyConfig(async () => {
+      this.configRead = true;
       if (this.needsRestart(raw)) {
         await this.start(raw, { fresh: true });
         return;
@@ -784,18 +775,47 @@ export class SolarfocusApp {
       return;
     }
     const startedAt = this.mono();
+    const read = {
+      blocks: pollBlocks(layoutOf(this.config)),
+      index: 0,
+      current: undefined,
+      raw: {},
+      failed: [],
+      answeredNow: new Set(),
+      timeouts: 0,
+    };
     let result;
     let failure;
-    try {
-      result = await this.useLine(
-        'read',
-        target,
-        TIMINGS.connectTimeout,
-        (session) => this.readAll(session),
-        { yieldTo: () => this.reserved > 0 || this.stops.length > 0 },
-      );
-    } catch (err) {
-      failure = err;
+    for (;;) {
+      try {
+        await this.useLine(
+          'read',
+          target,
+          TIMINGS.connectTimeout,
+          (session) => this.readBlocks(session, read),
+          { yieldTo: () => this.reserved > 0 || this.stops.length > 0 },
+        );
+        result = this.readResult(read);
+      } catch (err) {
+        failure = err;
+        if (
+          err.kind === ERROR_KINDS.TIMEOUT &&
+          read.current &&
+          generation === this.generation &&
+          this.timedOut(read)
+        ) {
+          // That block on a new connection is skipped; the next ones are read.
+          failure = undefined;
+          continue;
+        }
+      }
+      break;
+    }
+    if (failure?.kind === ERROR_KINDS.TIMEOUT && read.answeredNow.size > 0) {
+      // Too many blocks without an answer: what was read is kept, the rest is not read this time.
+      read.failed.push(...read.blocks.slice(read.index).map((b) => b.key));
+      result = this.readResult(read);
+      failure = undefined;
     }
     if (generation !== this.generation) {
       return;
@@ -818,21 +838,36 @@ export class SolarfocusApp {
   }
 
   /**
-   * Every block, one after the other. A block refused leaves its values
-   * unknown this time (an optional one refused with "illegal data address"
-   * before it was ever answered is not served by this firmware: not read
-   * again until a restart); a block whose probe was not answered this time
-   * is not read. A timeout, a closed connection or a wrong answer fails the
-   * whole read; so does every block refused.
+   * A block of a poll left without an answer: noted, skipped, and the poll
+   * goes on with the next block on a new connection, TIMINGS.readTimeouts
+   * times at most. True when the poll goes on.
    */
-  async readAll(session) {
-    const raw = {};
-    const failed = [];
-    const answeredNow = new Set();
-    for (const block of pollBlocks(layoutOf(this.config))) {
-      if (this.absent.has(block.key) || (block.probe && !answeredNow.has(block.probe))) {
+  timedOut(read) {
+    const block = read.current;
+    read.current = undefined;
+    read.failed.push(block.key);
+    read.index += 1;
+    read.timeouts += 1;
+    this.logger.warn(`Solarfocus: no answer for the ${block.key} registers`);
+    return read.timeouts < TIMINGS.readTimeouts;
+  }
+
+  /**
+   * The blocks of a poll from `read.index`, one after the other. A block
+   * refused leaves its values unknown this time (an optional one refused
+   * with "illegal data address" before it was ever answered is not served
+   * by this firmware: not read again until a restart); a block whose probe
+   * was not answered this time is not read. A closed connection or a wrong
+   * answer fails the whole read; a block without an answer is skipped by
+   * `run` (`timedOut`).
+   */
+  async readBlocks(session, read) {
+    for (; read.index < read.blocks.length; read.index += 1) {
+      const block = read.blocks[read.index];
+      if (this.absent.has(block.key) || (block.probe && !read.answeredNow.has(block.probe))) {
         continue;
       }
+      read.current = block;
       let values;
       try {
         values = await this.readBlock(session, block, { timeoutMs: TIMINGS.requestTimeout });
@@ -840,25 +875,35 @@ export class SolarfocusApp {
         if (err.kind !== ERROR_KINDS.REFUSED) {
           throw err;
         }
+        read.current = undefined;
         if (block.optional && err.code === ILLEGAL_DATA_ADDRESS && !this.answered.has(block.key)) {
           this.absent.add(block.key);
           this.logger.info(`Solarfocus: this firmware does not serve the ${block.key} registers`);
         } else {
-          failed.push(block.key);
+          read.failed.push(block.key);
           this.logger.warn(
             `Solarfocus: reading the ${block.key} registers failed (${errorReason(err)})`,
           );
         }
         continue;
       }
+      read.current = undefined;
       this.answered.add(block.key);
-      answeredNow.add(block.key);
-      Object.assign(raw, values);
+      read.answeredNow.add(block.key);
+      Object.assign(read.raw, values);
     }
-    if (answeredNow.size === 0) {
-      throw new ModbusError(ERROR_KINDS.REFUSED, 'every read refused', { sent: true });
+  }
+
+  /** The values of a poll; every block refused or silent is a failed read. */
+  readResult(read) {
+    if (read.answeredNow.size === 0) {
+      throw new ModbusError(
+        read.timeouts > 0 ? ERROR_KINDS.TIMEOUT : ERROR_KINDS.REFUSED,
+        'every read refused or unanswered',
+        { sent: true },
+      );
     }
-    return { values: interpret(raw), failed };
+    return { values: interpret(read.raw), failed: read.failed };
   }
 
   /** A read: the values of this read only (a value not read is unknown). */
@@ -875,19 +920,16 @@ export class SolarfocusApp {
       this.seen.add(role);
     }
     if (!sameTarget(target, this.memory.target)) {
-      // Another controller: what was known of the former one is not its.
       this.memory.target = target;
-      this.memory.heatingModes = {};
       this.saveMemory().catch(() => {});
     }
-    this.noteHeatingModes(values, target);
     this.observe(values, startedAt);
   }
 
   /** A failed read: the delay before the next one. */
+  /** A failed read: the delay before the next one. */
   failed(err) {
     const u = this.unit;
-    const reason = errorReason(err);
     const wait = Math.max(
       this.interval,
       TIMINGS.backoff[Math.min(u.failures, TIMINGS.backoff.length - 1)],
@@ -895,13 +937,15 @@ export class SolarfocusApp {
     u.failures += 1;
     u.online = false;
     u.wait = wait;
-    u.error = reason;
+    u.error = err?.kind;
+    u.reason = reasonOf(err);
     this.logger.warn(
-      `Solarfocus: ${err?.message ?? reason}; next try in ${Math.round(wait / 1000)} s`,
+      `Solarfocus: ${err?.message ?? errorReason(err)}; next try in ${Math.round(wait / 1000)} s`,
     );
     return wait;
   }
 
+  /** The connection status of the configuration screen. */
   /** The connection status of the configuration screen. */
   status() {
     const u = this.unit;
@@ -910,22 +954,28 @@ export class SolarfocusApp {
       let out = text;
       if (c.badCounts) out = join(out, T.badCounts);
       if (c.badGenerator) out = join(out, T.badGenerator);
-      const pending = [...this.stopGuards.entries()]
-        .filter(([, g]) => sameTarget(g.target, this.target()))
-        .map(([register]) => stopRole(register));
-      if (pending.length > 0) out = join(out, T.stopsPending(pending.join(', ')));
+      // Every stop not confirmed, whatever its controller.
+      const here = [];
+      const elsewhere = [];
+      for (const g of this.stopGuards.values()) {
+        const name = componentName(g.plan.command.component, g.plan.command.n);
+        if (sameTarget(g.target, this.target())) here.push(name);
+        else elsewhere.push([addressKey(g.target), name]);
+      }
+      if (here.length > 0) out = join(out, T.stopsPending(here));
+      if (elsewhere.length > 0) out = join(out, T.stopsElsewhere(elsewhere));
       return out;
     };
     if (!c.address) {
-      if (c.invalid) return T.invalid(c.invalid);
-      return c.badUnitId ? T.badUnitId : T.noHost;
+      const text = c.invalid ? T.invalid(c.invalid) : c.badUnitId ? T.badUnitId : T.noHost;
+      return notes(text);
     }
     if (u.online === false) {
       const wait = age(u.wait ?? this.interval);
       return notes(
         [ERROR_KINDS.UNREACHABLE, ERROR_KINDS.TIMEOUT, ERROR_KINDS.CLOSED].includes(u.error)
           ? T.unreachable(addressKey(c.address), wait)
-          : T.failing(u.error ?? 'error', wait),
+          : T.failing(u.reason ?? reasonOf(undefined), wait),
       );
     }
     if (u.online === undefined) {
@@ -1239,7 +1289,7 @@ export class SolarfocusApp {
       if (!job.state.written) {
         throw this.refusal(ERRORS.queued);
       }
-      throw this.refusal(ERRORS.sentUnconfirmed(word(ERRORS.noAnswerYet, this.config.language)));
+      throw this.refusal(ERRORS.sentUnconfirmed(ERRORS.noAnswerYet));
     }
     if (outcome.error) {
       throw outcome.error;
@@ -1309,6 +1359,8 @@ export class SolarfocusApp {
       }
       this.queue.shift();
       job.started = true;
+      // Its turn: the window of a scene's command runs from here (src/constants.js queueWindow).
+      job.turnAt = this.mono();
       let outcome;
       try {
         await this.commandSession(session, job);
@@ -1331,10 +1383,10 @@ export class SolarfocusApp {
       return err;
     }
     const { plan, state } = job;
-    const reason = errorReason(err);
+    const reason = reasonOf(err);
     const what = `${plan.role} ${plan.written}`;
     if (!state.written) {
-      this.logger.warn(`Solarfocus: command NOT sent (${what}): ${reason}`);
+      this.logger.warn(`Solarfocus: command NOT sent (${what}): ${errorReason(err)}`);
       if (err?.kind === ERROR_KINDS.LATE) {
         return this.refusal(ERRORS.tooSlow);
       }
@@ -1346,7 +1398,9 @@ export class SolarfocusApp {
       return this.refusal(ERRORS.notSent(reason));
     }
     if (state.refused) {
-      this.logger.warn(`Solarfocus: command refused by the controller (${what}): ${reason}`);
+      this.logger.warn(
+        `Solarfocus: command refused by the controller (${what}): ${errorReason(err)}`,
+      );
       return this.refusal(ERRORS.refused(reason));
     }
     return this.unconfirmed(plan, state, reason);
@@ -1361,7 +1415,7 @@ export class SolarfocusApp {
       until: this.mono() + TIMINGS.guard,
     });
     this.followUp();
-    this.logger.warn(`Solarfocus: command sent, NOT confirmed (${plan.role}): ${reason}`);
+    this.logger.warn(`Solarfocus: command sent, NOT confirmed (${plan.role}): ${reason.en}`);
     return this.refusal(ERRORS.sentUnconfirmed(reason));
   }
 
@@ -1386,15 +1440,9 @@ export class SolarfocusApp {
     }
   }
 
-  /**
-   * What a command reads first and reads back: the blocks of the registers
-   * it writes. A circuit mode: its whole operating state (§ 6.2).
-   */
+  /** What a command reads first and reads back (a circuit mode: its whole operating state, § 6.2). */
   commandBlocks(command) {
-    if (command.kind === 'circuitMode') {
-      return circuitControlBlocks(command.n);
-    }
-    return [pointBlock(command.read, command.register, command.kind === 'dhwMode' ? 'u' : 't')];
+    return command.blocks;
   }
 
   /**
@@ -1432,7 +1480,7 @@ export class SolarfocusApp {
   }
 
   /** Whether a fresh read shows what the command asked (all of it, for a circuit mode). */
-  showsAsked(plan, fresh, heatingMode) {
+  showsAsked(plan, fresh) {
     const { command } = plan;
     if (this.decisive(command, fresh) !== plan.expected) {
       return false;
@@ -1442,11 +1490,7 @@ export class SolarfocusApp {
     }
     const v = fresh.values;
     const n = command.n;
-    return (
-      v[`circuit.${n}.flowSetpoint`] === 0 &&
-      v[`circuit.${n}.cooling`] === 0 &&
-      (heatingMode === undefined || v[`circuit.${n}.heatingMode`] === heatingMode)
-    );
+    return v[`circuit.${n}.flowSetpoint`] === 0 && v[`circuit.${n}.cooling`] === 0;
   }
 
   /** One write of one register in `session`: its echo, else the session is not trusted. */
@@ -1462,8 +1506,11 @@ export class SolarfocusApp {
   async commandSession(session, job) {
     const { plan, state } = job;
     const { command } = plan;
-    // A queued command starts within 15 s of its arrival, or never.
-    const startBy = job.received + TIMINGS.queueWindow;
+    // A queued command starts within 15 s of its turn and 60 s of its arrival, or never.
+    const startBy = Math.min(
+      job.received + TIMINGS.queueMax,
+      (job.turnAt ?? job.received) + TIMINGS.queueWindow,
+    );
     const readMs = Math.min(TIMINGS.commandReadMax, startBy - this.mono());
     if (readMs < TIMINGS.commandMinRead) {
       throw this.refusal(ERRORS.tooSlow);
@@ -1479,7 +1526,7 @@ export class SolarfocusApp {
         throw err;
       }
       const sessionDead = err.kind !== ERROR_KINDS.REFUSED;
-      const refusal = this.refusal(ERRORS.unknownState(errorReason(err)));
+      const refusal = this.refusal(ERRORS.unknownState(reasonOf(err)));
       if (sessionDead) {
         refusal.sessionDead = true;
       }
@@ -1505,15 +1552,13 @@ export class SolarfocusApp {
     this.checkCommand(job);
     this.noteValues(fresh.values);
     state.from = from;
-    const heatingMode =
-      command.kind === 'circuitMode' ? fresh.values[`circuit.${command.n}.heatingMode`] : undefined;
     // A guard (a command or a stop not seen yet) makes it written anyway: the
     // value read may not show the previous one yet, and a stop kept for
     // this register is lifted only by a newer command that left.
     if (
-      this.showsAsked(plan, fresh, heatingMode) &&
+      this.showsAsked(plan, fresh) &&
       !this.guardActive(command.read) &&
-      !this.stopGuards.has(command.register)
+      !this.stopGuards.has(guardKey(job.target, command.register))
     ) {
       this.logger.info(`Solarfocus: ${plan.role} already so, nothing sent`);
       return;
@@ -1533,7 +1578,7 @@ export class SolarfocusApp {
             this.lastSentAt = this.mono();
             if (address === command.register) {
               // A newer command for this register left: an older stop is never sent again after it.
-              this.dropStopGuard(command.register);
+              this.dropStopGuard(guardKey(job.target, command.register));
             }
           },
         });
@@ -1545,13 +1590,17 @@ export class SolarfocusApp {
       }
     }
     // Confirmed only by the values read back equal to the values asked.
-    const back = await this.readFresh(session, blocks, { timeoutMs: TIMINGS.requestTimeout });
+    // A circuit: its mode, flow setpoint and cooling (the heating mode was written as read).
+    const back = await this.readFresh(session, command.stopBlocks ?? blocks, {
+      timeoutMs: TIMINGS.requestTimeout,
+    });
     this.noteValues(back.values);
-    if (!this.showsAsked(plan, back, heatingMode)) {
-      throw new ModbusError(
-        ERROR_KINDS.PROTOCOL,
-        word(ERRORS.readBackDiffers, this.config.language),
-        { sent: true },
+    if (!this.showsAsked(plan, back)) {
+      throw Object.assign(
+        new ModbusError(ERROR_KINDS.PROTOCOL, 'the value read back is not the one asked', {
+          sent: true,
+        }),
+        { reason: ERRORS.readBackDiffers },
       );
     }
     this.guards.delete(command.read);
@@ -1573,57 +1622,122 @@ export class SolarfocusApp {
   /**
    * The writes of a stop, in order, without any read first. A circuit off is
    * § 6.2.3 of the document, the mode first (the rest can only follow it):
-   * mode 3, flow setpoint 0, cooling 0, and the heating mode last read on
-   * this controller (2, the document's value, when never read; nothing on a
-   * firmware without it). A tank always off: its mode, 0.
+   * mode 3, flow setpoint 0, cooling 0; then its heating mode is read and
+   * written back as it is (`rewriteHeatingMode`). A tank always off: its
+   * mode, 0.
    */
-  stopWrites(plan, target) {
+  stopWrites(plan) {
     const { command } = plan;
     if (command.kind !== 'circuitMode') {
       return [[command.register, plan.written]];
     }
     const h = circuitHolding(command.n);
-    const writes = [
+    return [
       [h + 3, plan.written],
       [h, 0],
       [h + 2, 0],
     ];
-    const heatingMode = this.heatingModeFor(command.n, target);
-    if (heatingMode !== 'absent') {
-      writes.push([h + 8, heatingMode ?? 2]);
-    }
-    return writes;
   }
 
   /**
    * Writes the group of a stop in `session`. The first write (the mode) is
-   * the stop: its refusal fails the stop; a refusal of another register of
-   * the group is logged and the next one written (the heating mode refused
-   * as "illegal data address": this firmware has none, remembered).
+   * the stop: its failure fails the stop; `echoed()` runs once the controller
+   * acknowledged it. A refusal of another register of the group is logged
+   * and the next one written; the result counts them (the read back then
+   * shows whether the group is complete).
    */
-  async writeStop(session, plan, target, beforeSend, timeoutMs) {
-    const writes = this.stopWrites(plan, target);
-    for (const [index, [address, value]] of writes.entries()) {
+  async writeStop(session, plan, { beforeSend, echoed, timeoutMs } = {}) {
+    let refusals = 0;
+    for (const [index, [address, value]] of this.stopWrites(plan).entries()) {
       try {
         await this.writeOne(session, address, value, {
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(index === 0 ? { beforeSend } : {}),
         });
+        if (index === 0) echoed?.();
       } catch (err) {
         if (index === 0 || err.kind !== ERROR_KINDS.REFUSED) {
           throw err;
         }
-        if (
-          err.code === ILLEGAL_DATA_ADDRESS &&
-          address === circuitHolding(plan.command.n) + 8 &&
-          sameTarget(target, this.memory.target)
-        ) {
-          this.memory.heatingModes = { ...this.memory.heatingModes, [plan.command.n]: 'absent' };
-          this.saveMemory().catch(() => {});
-        }
+        refusals += 1;
         this.logger.warn(
           `Solarfocus: ${plan.role}: register ${address} of the stop refused (${errorReason(err)})`,
         );
+      }
+    }
+    return { refusals };
+  }
+
+  /**
+   * The heating mode of a circuit stopped (32608, § 6.2.3 writes it too):
+   * read now, after the mode, and written back as it is; nothing when this
+   * firmware has none or it is refused. Without an answer (the session is
+   * lost), the next tries of this stop (`holder`) go without it.
+   */
+  async rewriteHeatingMode(session, plan, holder) {
+    const { command } = plan;
+    if (command.kind !== 'circuitMode' || holder.skipHeatingMode) return;
+    const block = command.blocks.find((b) => b.optional);
+    if (this.absent.has(block.key)) return;
+    try {
+      const fresh = await this.readFresh(session, [block], { timeoutMs: TIMINGS.requestTimeout });
+      const value = fresh.values[`circuit.${command.n}.heatingMode`];
+      if (value !== undefined) {
+        await this.writeOne(session, block.points[0][0], value);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Solarfocus: ${plan.role}: heating mode not written back (${errorReason(err)})`,
+      );
+      if (err.kind !== ERROR_KINDS.REFUSED) {
+        // The session is lost with it: the next tries of this stop go without it.
+        holder.skipHeatingMode = true;
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * What a read shows of a stop: the mode (a tank: the mode it applies, 502);
+   * a circuit read "off" whose flow setpoint or cooling is not 0 is PARTIAL;
+   * undefined when unknown.
+   */
+  stopValueOf(plan, values) {
+    const { command } = plan;
+    const mode = values[command.read];
+    if (command.kind !== 'circuitMode' || mode !== command.protective) return mode;
+    const flow = values[`circuit.${command.n}.flowSetpoint`];
+    const cooling = values[`circuit.${command.n}.cooling`];
+    if (flow === undefined || cooling === undefined) return undefined;
+    return flow === 0 && cooling === 0 ? mode : PARTIAL;
+  }
+
+  /** Reads what confirms a stop, in `session`: `{ value, values }`. */
+  async readStop(session, plan, options) {
+    const { values } = await this.readFresh(session, plan.command.stopBlocks, options);
+    return { value: this.stopValueOf(plan, values), values };
+  }
+
+  /**
+   * Whether the stops of `target` may be checked and written now: always
+   * before the configuration is read (a restart), then only on the
+   * controller of the configuration.
+   */
+  mayWrite(target) {
+    return !this.configRead || sameTarget(target, this.target());
+  }
+
+  /** The guard of a stop of `register` on the controller of the configuration. */
+  guardOf(register, target = this.target()) {
+    return target ? this.stopGuards.get(guardKey(target, register)) : undefined;
+  }
+
+  /** The guards of the controller of the configuration, put aside before, are checked again. */
+  wakeGuards() {
+    for (const guard of this.stopGuards.values()) {
+      if (guard.dormant && this.mayWrite(guard.target)) {
+        guard.dormant = false;
+        this.armStopCheck(guard.key, 0);
       }
     }
   }
@@ -1653,7 +1767,7 @@ export class SolarfocusApp {
       if (!job.state.written) {
         throw this.refusal(ERRORS.stopPending);
       }
-      throw this.refusal(ERRORS.sentUnconfirmed(word(ERRORS.noAnswerYet, this.config.language)));
+      throw this.refusal(ERRORS.sentUnconfirmed(ERRORS.noAnswerYet));
     }
     if (outcome.error) {
       throw outcome.error;
@@ -1702,7 +1816,7 @@ export class SolarfocusApp {
             await this.sendStop(job);
           } catch (err) {
             this.logger.warn(`Solarfocus: stop failed: ${err.message}`);
-            job.resolve({ error: this.refusal(ERRORS.notSent(errorReason(err))) });
+            job.resolve({ error: this.refusal(ERRORS.notSent(reasonOf(err))) });
           }
           this.stops.shift();
         }
@@ -1722,9 +1836,11 @@ export class SolarfocusApp {
    * overridden) or 'resend'. When the values of before are unknown (a stop
    * clicked before any read), the first value read after the stop is taken
    * as one: an unknown value of before never counts as set elsewhere. A
-   * stop written is sent again only once the controller had the time to
-   * apply it (20 s), three times at most; a stop that never left is tried
-   * again at every check. Never decided by the time alone.
+   * circuit read off without its flow setpoint and cooling at 0 (PARTIAL) is
+   * sent again. A stop written is sent again only once the controller had
+   * the time to apply it (20 s), three times at most (a resend counts once
+   * the controller acknowledged it); a stop that never left is tried again
+   * at every check. Never decided by the time alone.
    */
   decideStop(stop, value, readStartedAt) {
     if (value === undefined) {
@@ -1743,12 +1859,14 @@ export class SolarfocusApp {
     if (!applied) {
       return 'wait';
     }
-    if (stop.before.length === 0) {
-      stop.before.push(value);
-    } else if (!stop.before.includes(value)) {
-      const count = stop.changed?.value === value ? stop.changed.count + 1 : 1;
-      stop.changed = { value, count };
-      return count >= 2 ? 'drop' : 'wait';
+    if (value !== PARTIAL) {
+      if (stop.before.length === 0) {
+        stop.before.push(value);
+      } else if (!stop.before.includes(value)) {
+        const count = stop.changed?.value === value ? stop.changed.count + 1 : 1;
+        stop.changed = { value, count };
+        return count >= 2 ? 'drop' : 'wait';
+      }
     }
     stop.changed = undefined;
     if (stop.written && stop.reasserts >= TIMINGS.stopReasserts) {
@@ -1759,14 +1877,18 @@ export class SolarfocusApp {
 
   /**
    * One click of a stop: its writes without a fresh read, then the read back
-   * that alone confirms it. A refused connection, a closed connection, a
-   * timeout or a wrong answer is tried again every 250 ms until 3 s after
-   * the click (the writes are idempotent). A new click renews the guard of
-   * its register: three resends again, the current value as a value of
-   * before.
+   * that alone confirms it (a circuit: mode 3, flow setpoint 0 and cooling 0
+   * read back). Tried again every 250 ms until 3 s after the start of its
+   * turn (the writes are idempotent) when the connection is refused or
+   * closed, an answer is late or wrong, the controller answers a Modbus
+   * exception other than 1-3 (busy, failure: not applied), or a register of
+   * the group was refused and the read back shows it. A new click renews the
+   * guard of its register: three resends again, the current value as a value
+   * of before. The guard is in /data before the first write.
    */
   async sendStop(job) {
-    const { plan, target, register, state } = job;
+    const { plan, target, state } = job;
+    // The budget runs from the start of its turn: a stop queued behind another one has it whole.
     const retryUntil = Math.max(job.received, this.mono()) + TIMINGS.commandSendBy;
     const known = sameTarget(target, this.target())
       ? this.unit.values?.[plan.command.read]
@@ -1775,7 +1897,7 @@ export class SolarfocusApp {
     const pending = this.guardActive(plan.command.read)
       ? this.guards.get(plan.command.read)
       : undefined;
-    const guard = this.ensureStopGuard(register, plan, target);
+    const guard = this.ensureStopGuard(plan, target);
     for (const value of [pending?.expected, known]) {
       if (value !== undefined && value !== plan.expected && !guard.before.includes(value)) {
         guard.before.push(value);
@@ -1785,33 +1907,43 @@ export class SolarfocusApp {
     guard.reasserts = 0;
     guard.confirms = 0;
     guard.changed = undefined;
+    guard.dormant = false;
     guard.at = this.now();
+    // In /data before the first write: a restart during the 3 s keeps it.
+    this.persistStops();
     let back;
+    let values;
     const attempt = async (session) => {
       const timeoutMs = Math.max(250, Math.min(TIMINGS.requestTimeout, retryUntil - this.mono()));
-      await this.writeStop(
-        session,
-        plan,
-        target,
-        () => {
+      const { refusals } = await this.writeStop(session, plan, {
+        timeoutMs,
+        beforeSend: () => {
           state.written = true;
           state.sentAt = this.mono();
           this.lastSentAt = state.sentAt;
-          const current = this.stopGuards.get(register);
+          const current = this.stopGuards.get(guard.key);
           if (current) {
             current.written = true;
             current.sentAt = state.sentAt;
           }
         },
-        timeoutMs,
-      );
-      back = interpret(
-        await this.readBlock(session, pointBlock(plan.command.read, register, 'u'), {
-          timeoutMs: TIMINGS.requestTimeout,
-        }),
-      )[plan.command.read];
+      });
+      state.groupWritten = true;
+      await this.rewriteHeatingMode(session, plan, job);
+      ({ value: back, values } = await this.readStop(session, plan, {
+        timeoutMs: TIMINGS.requestTimeout,
+      }));
+      if (back === PARTIAL && refusals > 0) {
+        // A register of the group was refused and it shows: the group is written again.
+        throw Object.assign(
+          new ModbusError(ERROR_KINDS.PROTOCOL, 'stop not complete', { sent: true }),
+          { reason: ERRORS.stopIncomplete },
+        );
+      }
     };
-    const AGAIN = [ERROR_KINDS.CLOSED, ERROR_KINDS.TIMEOUT, ERROR_KINDS.PROTOCOL];
+    const again = (err) =>
+      [ERROR_KINDS.CLOSED, ERROR_KINDS.TIMEOUT, ERROR_KINDS.PROTOCOL].includes(err?.kind) ||
+      (err?.kind === ERROR_KINDS.REFUSED && !NOT_APPLIED_EXCEPTIONS.has(err.code));
     let failure;
     this.logger.info(`Solarfocus: stop ${plan.role}`);
     for (;;) {
@@ -1821,38 +1953,43 @@ export class SolarfocusApp {
         break;
       } catch (err) {
         failure = err;
-        if (!AGAIN.includes(err?.kind) || this.mono() + TIMINGS.connectRetry >= retryUntil) {
+        if (!again(err) || this.mono() + TIMINGS.connectRetry >= retryUntil) {
           break;
         }
         await new Promise((resolve) => this.timers.setTimeout(resolve, TIMINGS.connectRetry));
       }
     }
     const confirmed = back === plan.expected;
-    const current = this.stopGuards.get(register);
+    const current = this.stopGuards.get(guard.key);
     if (current) {
       if (confirmed && !current.sticky) {
-        this.dropStopGuard(register);
+        this.dropStopGuard(guard.key);
       } else {
         this.persistStops();
-        this.armStopCheck(register);
+        this.armStopCheck(guard.key);
       }
     }
     if (state.written) {
       this.followUp();
     }
-    if (sameTarget(target, this.target()) && back !== undefined) {
-      this.noteValues({ [plan.command.read]: back });
+    if (sameTarget(target, this.target()) && values) {
+      this.noteValues(values);
     }
     let result;
     if (confirmed) {
       this.logger.info(`Solarfocus: stop ${plan.role} confirmed by the controller`);
       result = {};
     } else if (failure) {
-      const reason = errorReason(failure);
-      this.logger.warn(`Solarfocus: stop ${plan.role} failed (${reason})`);
+      this.logger.warn(`Solarfocus: stop ${plan.role} failed (${errorReason(failure)})`);
+      const reason = reasonOf(failure);
       if (!state.written) {
         result = { error: this.refusal(ERRORS.notSent(reason)) };
-      } else if (failure.kind === ERROR_KINDS.REFUSED && NOT_APPLIED_EXCEPTIONS.has(failure.code)) {
+      } else if (
+        failure.kind === ERROR_KINDS.REFUSED &&
+        NOT_APPLIED_EXCEPTIONS.has(failure.code) &&
+        !state.groupWritten
+      ) {
+        // The mode itself refused (a read back refused after it is "without confirmation").
         result = { error: this.refusal(ERRORS.refused(reason)) };
       } else {
         result = { error: this.refusal(ERRORS.sentUnconfirmed(reason)) };
@@ -1860,7 +1997,7 @@ export class SolarfocusApp {
     } else {
       result = {
         error: this.refusal(
-          ERRORS.sentUnconfirmed(word(ERRORS.readBackDiffers, this.config.language)),
+          ERRORS.sentUnconfirmed(back === PARTIAL ? ERRORS.stopIncomplete : ERRORS.readBackDiffers),
         ),
       };
     }
@@ -1878,24 +2015,36 @@ export class SolarfocusApp {
   }
 
   /**
-   * The periodic check of a stop guard: reads the register, then writes the
-   * stop again only when `decideStop` says so. Never ends another session:
-   * it waits for the line, and gives its turn up (tried again a second
-   * later) to a click or a command waiting or running, which are newer; a
-   * click ends it. Right before its write, it gives way again if a click or
-   * a command arrived meanwhile. Not answered to anyone: no ack.
+   * The periodic check of a stop guard: reads what confirms it, then writes
+   * the stop again only when `decideStop` says so. Never on a controller
+   * that is not the configured one once the configuration is read: the
+   * guard is then put aside (shown in the status, nothing sent there) until
+   * that controller is configured again. Never ends another session: it
+   * waits for the line, and gives its turn up (tried again a second later)
+   * to a click or a command waiting or running, which are newer; a click
+   * ends it. Right before its write, it gives way again if a click or a
+   * command arrived meanwhile. Not answered to anyone: no ack.
    */
-  async runCheck(register) {
-    const guard = this.stopGuards.get(register);
+  async runCheck(key) {
+    const guard = this.stopGuards.get(key);
     if (!guard) return;
-    if (this.checkMustYield() || this.checking !== undefined) {
-      this.armStopCheck(register, TIMINGS.checkYield);
+    if (!this.mayWrite(guard.target)) {
+      if (!guard.dormant) {
+        guard.dormant = true;
+        this.logger.warn(
+          `Solarfocus: a stop on ${addressKey(guard.target)}, not the configured controller, is no longer checked nor sent`,
+        );
+        this.updateStatus().catch(() => {});
+      }
       return;
     }
-    const plan = this.stopPlan(register);
-    const outcome = { decision: undefined, back: undefined, written: false };
-    const block = pointBlock(plan.command.read, register, 'u');
-    this.checking = register;
+    if (this.checkMustYield() || this.checking !== undefined) {
+      this.armStopCheck(key, TIMINGS.checkYield);
+      return;
+    }
+    const { plan } = guard;
+    const outcome = { decision: undefined, back: undefined, values: undefined, written: false };
+    this.checking = key;
     try {
       await this.useLine(
         'check',
@@ -1903,25 +2052,40 @@ export class SolarfocusApp {
         TIMINGS.connectTimeout,
         async (session) => {
           const startedAt = this.mono();
-          const value = interpret(await this.readBlock(session, block))[plan.command.read];
-          if (this.stopGuards.get(register) !== guard) return;
-          outcome.back = value;
-          outcome.decision = this.decideStop(guard, value, startedAt);
+          const read = await this.readStop(session, plan);
+          if (this.stopGuards.get(key) !== guard) return;
+          outcome.back = read.value;
+          outcome.values = read.values;
+          outcome.decision = this.decideStop(guard, read.value, startedAt);
           if (outcome.decision !== 'resend') return;
-          await this.writeStop(session, plan, guard.target, () => {
-            if (this.checkMustYield() || this.stopGuards.get(register) !== guard) {
-              throw Object.assign(new Error('a newer click or command'), { yielded: true });
-            }
-            this.logger.warn(
-              `Solarfocus: ${plan.role} still ${value} after a stop: stop sent again`,
-            );
-            outcome.written = true;
-            if (guard.written) guard.reasserts += 1;
-            guard.written = true;
-            guard.sentAt = this.mono();
-            this.lastSentAt = guard.sentAt;
+          let resend = false;
+          await this.writeStop(session, plan, {
+            beforeSend: () => {
+              if (
+                this.checkMustYield() ||
+                this.stopGuards.get(key) !== guard ||
+                !this.mayWrite(guard.target)
+              ) {
+                throw Object.assign(new Error('a newer click or command'), { yielded: true });
+              }
+              this.logger.warn(
+                `Solarfocus: ${plan.role} still ${read.value} after a stop: stop sent again`,
+              );
+              outcome.written = true;
+              resend = guard.written;
+              guard.written = true;
+              guard.sentAt = this.mono();
+              this.lastSentAt = guard.sentAt;
+            },
+            // A resend counts once the controller acknowledged it (not when it refused it).
+            echoed: () => {
+              if (resend) guard.reasserts += 1;
+            },
           });
-          outcome.back = interpret(await this.readBlock(session, block))[plan.command.read];
+          await this.rewriteHeatingMode(session, plan, guard);
+          const back = await this.readStop(session, plan);
+          outcome.back = back.value;
+          outcome.values = back.values;
         },
         { yieldTo: () => this.checkMustYield() },
       );
@@ -1932,30 +2096,35 @@ export class SolarfocusApp {
     } finally {
       this.checking = undefined;
     }
-    if (this.stopGuards.get(register) !== guard) return;
+    if (this.stopGuards.get(key) !== guard) return;
     if (outcome.decision === 'done' || (outcome.back === guard.stopValue && !guard.sticky)) {
-      this.dropStopGuard(register);
+      this.dropStopGuard(key);
     } else if (outcome.decision === 'drop') {
       this.logger.info(
         `Solarfocus: ${plan.role} changed after the stop (not by Gladys): the stop is not sent again`,
       );
-      this.dropStopGuard(register);
+      this.dropStopGuard(key);
     } else {
       this.persistStops();
       if (outcome.written) this.followUp();
-      this.armStopCheck(register);
+      this.armStopCheck(key);
     }
-    if (sameTarget(guard.target, this.target()) && outcome.back !== undefined) {
-      this.noteValues({ [plan.command.read]: outcome.back });
+    if (sameTarget(guard.target, this.target()) && outcome.values) {
+      this.noteValues(outcome.values);
     }
   }
 
   /** The guard of a stop of `register` (created when none runs for this target). */
-  ensureStopGuard(register, plan, target) {
-    let guard = this.stopGuards.get(register);
-    if (!guard || !sameTarget(guard.target, target)) {
-      if (guard) this.dropStopGuard(register);
+  /** The guard of the stop of `plan` on `target` (created when none runs). */
+  ensureStopGuard(plan, target) {
+    const register = plan.command.register;
+    const key = guardKey(target, register);
+    let guard = this.stopGuards.get(key);
+    if (!guard) {
       guard = {
+        key,
+        register,
+        plan,
         readKey: plan.command.read,
         stopValue: plan.expected,
         target,
@@ -1967,18 +2136,19 @@ export class SolarfocusApp {
         sticky: false,
         confirms: 0,
         changed: undefined,
+        dormant: false,
         timer: undefined,
       };
-      this.stopGuards.set(register, guard);
+      this.stopGuards.set(key, guard);
     }
     return guard;
   }
 
-  dropStopGuard(register) {
-    const guard = this.stopGuards.get(register);
+  dropStopGuard(key) {
+    const guard = this.stopGuards.get(key);
     if (!guard) return;
     if (guard.timer) this.timers.clearTimeout(guard.timer);
-    this.stopGuards.delete(register);
+    this.stopGuards.delete(key);
     this.persistStops();
   }
 
@@ -1988,16 +2158,16 @@ export class SolarfocusApp {
    * and even when the reads fail; every 5 minutes after (a read only, until
    * it is confirmed or lifted).
    */
-  armStopCheck(register, delay) {
-    const guard = this.stopGuards.get(register);
+  armStopCheck(key, delay) {
+    const guard = this.stopGuards.get(key);
     if (!guard) return;
     if (guard.timer) this.timers.clearTimeout(guard.timer);
     const sending = !guard.written || guard.reasserts < TIMINGS.stopReasserts;
     const wait = delay ?? (sending ? TIMINGS.stopRetry : 5 * MINUTE);
     guard.timer = this.timers.setTimeout(() => {
       guard.timer = undefined;
-      if (this.stopGuards.get(register) !== guard) return;
-      this.runCheck(register).catch((err) => this.logger.warn(`Solarfocus: check: ${err.message}`));
+      if (this.stopGuards.get(key) !== guard) return;
+      this.runCheck(key).catch((err) => this.logger.warn(`Solarfocus: check: ${err.message}`));
     }, wait);
   }
 
@@ -2015,9 +2185,10 @@ export class SolarfocusApp {
   /**
    * A read through the guards. A command guard lifts when the value moved
    * from the start value to the one asked (never on an unknown value). A
-   * stop guard: lifted when the read shows the stop (decideStop), or when
-   * another value is read twice in a row (set elsewhere: never overridden);
-   * the resending is the job of the checks.
+   * stop guard of the controller read: lifted when the read shows the stop
+   * (decideStop), or when another value is read twice in a row (set
+   * elsewhere: never overridden); the resending is the job of the checks.
+   * The guards of other controllers are never decided on this read.
    */
   observe(values, readStartedAt) {
     for (const key of [...this.guards.keys()]) {
@@ -2032,21 +2203,25 @@ export class SolarfocusApp {
         this.guards.delete(key);
       }
     }
-    for (const [register, stop] of [...this.stopGuards]) {
-      if (!sameTarget(stop.target, this.target()) || values[stop.readKey] === undefined) {
+    for (const [key, stop] of [...this.stopGuards]) {
+      if (!sameTarget(stop.target, this.target())) {
         continue;
       }
-      const decision = this.decideStop(stop, values[stop.readKey], readStartedAt);
+      const value = this.stopValueOf(stop.plan, values);
+      if (value === undefined) {
+        continue;
+      }
+      const decision = this.decideStop(stop, value, readStartedAt);
       if (decision === 'done') {
-        this.dropStopGuard(register);
+        this.dropStopGuard(key);
       } else if (decision === 'drop') {
         this.logger.info(
           `Solarfocus: ${stop.readKey} changed after the stop (not by Gladys): the stop is not sent again`,
         );
-        this.dropStopGuard(register);
+        this.dropStopGuard(key);
       } else {
         this.persistStops();
-        if (decision === 'resend' && !stop.timer) this.armStopCheck(register, 0);
+        if (decision === 'resend' && !stop.timer) this.armStopCheck(key, 0);
       }
     }
   }

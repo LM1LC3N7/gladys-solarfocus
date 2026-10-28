@@ -76,7 +76,7 @@ test('the Solarfocus addresses (DR-0180-DE v14-260212, aiosolarfocus 0.3.0)', ()
   assert.equal(circuitHolding(7), 32900);
   assert.deepEqual(at['dhw.1.temperature'], [4, 500, 't']);
   assert.deepEqual(at['dhw.4.setpoint'], [3, 32150, 't']);
-  assert.deepEqual(at['dhw.2.mode'], [3, 32052, 'u']);
+  assert.deepEqual(at['dhw.2.mode'], [4, 552, 'u'], 'the mode applied (Ist)');
   assert.deepEqual(at['buffer.2.top'], [4, 1920, 't']);
   assert.deepEqual(at['buffer.4.bottom'], [4, 1961, 't']);
   const biomass = pollBlocks(LAYOUTS[2]).flatMap((b) => b.points.map(([a]) => a));
@@ -92,7 +92,7 @@ test('the Solarfocus addresses (DR-0180-DE v14-260212, aiosolarfocus 0.3.0)', ()
       ['circuit-1-heating-mode', true],
     ],
   );
-  assert.equal(dhwControlBlock(1).points.length, 3);
+  assert.deepEqual(dhwControlBlock(1).points, [[32000, 't', 'dhw.1.setpoint']]);
 });
 
 test('the fake compacts a read across a hole, as the controller does', async () => {

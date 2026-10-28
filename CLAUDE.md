@@ -39,7 +39,7 @@ src/modbus/protocol.js    requests, int16/uint16 words, the writes allowed and t
 src/model.js              raw values -> values: special values, ranges, mode texts (pure)
 src/devices.js            the Gladys device, its commands and states (pure)
 src/publisher.js          states within 300/min
-src/store.js              /data/solarfocus-state.json: last read, heating modes, stops not confirmed
+src/store.js              /data/solarfocus-state.json: last read, stops not confirmed
 src/config.js             config_schema normalized
 src/constants.js          register map, blocks, feature roles, limits, timings
 src/i18n.js               runtime texts (en/fr)
@@ -71,7 +71,8 @@ test/kit/                 virtual and real clocks, fake TCP server (from gladys-
 - **Stops** (circuit `off`, hot water `always-off`): never behind the option,
   bounds, a read, a command, a backoff, /data or a configuration not read;
   they drop the commands that arrived before them; their guard is never
-  lifted by the time.
+  lifted by the time, and never checked nor written on a controller that is
+  no longer the configured one.
 - Never read sooner than the interval (button, scan, reconnection, restart,
   configuration saved for the same controller); only the follow-up reads
   after a command (5 s, 25 s, 60 s).

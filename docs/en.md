@@ -54,14 +54,16 @@ never more often than the interval.
 - With a pellet or wood boiler: the boiler temperature.
 - For each configured circuit: mode (continuous, setback, automatic, off), room setpoint, flow and
   room temperatures.
-- For each hot water tank: release mode (always off, always on, programs), setpoint and temperature.
+- For each hot water tank: release mode applied (register 502: always off, always on, programs),
+  setpoint and temperature.
 - For each buffer tank: top and bottom temperatures.
 
 A measurement feature appears only once a value of it was read. Never published as measurements: the
 values of an unplugged sensor (130.0, 270.0 or 350.0 °C), a temperature of exactly 0.0 °C (what an
 absent component reads; except outdoors, where 0.0 °C is real), a room setpoint of 0 (no setpoint from
-Modbus), a mode or state outside Solarfocus's list, a value out of range. Energy counters are not
-published yet.
+Modbus), a mode or state outside Solarfocus's list, a value out of range. A block of registers
+without an answer is skipped (the read goes on over a new connection, twice per poll at most) and the
+status names it. Energy counters are not published yet.
 
 ## The commands
 
@@ -75,7 +77,9 @@ Off by default. With "Allow the commands", Gladys may change:
 
 A circuit mode is written the way Solarfocus asks (§ 6.2 of its document: all the registers of the
 circuit together): flow setpoint 0 (the controller's heating curve applies), cooling 0, the
-heating/cooling mode as read (software 22.090 or newer; older software has none), then the mode. The
+heating/cooling mode as read (software 22.090 or newer; older software has none), then the mode; the
+read back checks the mode, the flow setpoint and the cooling. A tank's mode is written to register
+32002 and read back from register 502, the mode the controller applies. The
 integration **never** sends a flow setpoint and **never** switches a circuit to cooling: the
 controller's dew point monitoring stays active. If another Modbus client (Loxone…) wrote a flow
 setpoint on a circuit, Gladys does not change its mode (the status says so); a stop still goes.
@@ -95,7 +99,7 @@ written (the writes already sent change nothing in the operation: 0 on a flow se
 
 Commands go one at a time, in their order of arrival, on a single connection. A scene setting several
 values sets them all: a command waiting its turn beyond 3.5 s is answered "waiting" and is sent within
-15 s of the click, or not at all.
+15 s of the start of its turn and 60 s of the click, or not at all.
 
 ## The stops
 
@@ -103,16 +107,24 @@ Turning a circuit **Off** (frost protection only) or a tank **Always off** **nev
 command option, the bounds, a read in progress or failed, a controller not read yet, a command
 waiting, nor on `/data` that cannot be written. A stop goes before everything; every command that
 arrived before it and has not left is dropped. Turning a circuit off writes what Solarfocus documents
-(§ 6.2.3), the mode first: mode 3, flow setpoint 0, cooling 0, then the heating/cooling mode last read
-(2, the document's value, when never read; nothing on software without it). A refused connection is
-tried again every 250 ms for 3 s; Gladys gets its answer within 3.5 s.
+(§ 6.2.3), the mode first: mode 3, flow setpoint 0, cooling 0, then the heating/cooling mode, read at
+that moment and written back as it is (nothing on software without it, or when it cannot be read). It
+is confirmed only when the read back shows mode 3, flow setpoint 0 and cooling 0; a tank, only when
+the mode applied (register 502) is "always off". For 3 s, the stop is tried again every 250 ms (the
+writes repeat without side effects) when the connection is refused or closed, an answer is missing or
+wrong, the controller answers a Modbus exception other than 1 to 3 (busy, failure: nothing applied),
+or a register of the circuit was refused and the read back shows it; those 3 s count from the start of
+its turn (a stop queued behind another one has them all). Gladys gets its answer within 3.5 s. The
+guard is in `/data` before the first write.
 
 A stop not confirmed is kept in `/data` with the values read before it. The integration checks the
 controller every 15 s, whatever the refresh interval: a stop that could not leave is tried again at
-each check; a stop written but not showing yet is sent again (3 times at most, at least 20 s after
-it was sent) while the controller shows a value of before. After those 3 resends, the controller is
-read every 5 minutes, without writing, and the status shows "Stop not confirmed" until the stop shows
-or the guard is lifted. This guard is **never** lifted by the time, only:
+each check; a stop written but not showing yet (or a circuit off without its flow setpoint and cooling
+at 0) is sent again, at least 20 s after it was sent, while the controller shows a value of before;
+only the resends the controller acknowledged count, 3 at most (a resend it refuses is tried again at
+the next check). After those 3 resends, the controller is read every 5 minutes, without writing, and
+the status shows "Stop not confirmed" until the stop shows or the guard is lifted. This guard is
+**never** lifted by the time, only:
 
 - by a read showing the stop (two reads in a row, after the time to apply it, when a command sent
   before the stop could still land);
@@ -121,22 +133,26 @@ or the guard is lifted. This guard is **never** lifted by the time, only:
   overridden. For a stop clicked before any read, the first value read after it counts as the value of
   before; an unknown value of before never counts as "changed elsewhere".
 
+When the configuration names another controller (a new address, another device), the guard of a stop
+of the former one is put aside: nothing more is sent to nor read at its address, the status shows it
+("Stop not confirmed on a controller no longer configured"), and it resumes if that controller is
+configured again. Before the configuration is read (at a restart), it is checked like the others.
+
 A check never interrupts a command: it waits behind the commands (newer than it) and never writes over
-them; a new click on a stop interrupts a check and is written then read back like a first click. After a restart,
-the check starts at once, before the configuration is even read.
+them; a new click on a stop interrupts a check and is written then read back like a first click. After
+a restart, the check starts at once, before the configuration is even read.
 
 A stop can fail or not be sent again in these cases:
 
 - no valid address in the configuration (or, before the configuration is read, no controller read
   before): refused, nothing sent;
-- the controller stays unreachable for 3 s: "not sent", then tried again every 15 s (and at a
-  restart);
-- the controller answers a Modbus exception on the mode register: "refused" or "sent, without
-  confirmation" depending on the code (an exception on the other registers of the circuit is logged,
-  the stop goes on);
-- the read back does not show the stop yet: "sent, without confirmation";
+- the controller stays unreachable or busy for 3 s: "not sent" or "sent, without confirmation", then
+  tried again every 15 s (and at a restart);
+- the controller refuses the mode itself (Modbus exception 1 to 3): "refused"; an exception on the
+  other registers of the circuit is logged and the stop goes on;
+- the read back does not show the whole stop yet, or cannot be read: "sent, without confirmation";
 - it is no longer sent again after another value read twice in a row, a newer Gladys command that
-  left, or 3 resends;
+  left, or 3 acknowledged resends; nor to a controller no longer configured;
 - `/data` holds a stop clicked "in the future" (clock set back): it is invalid and not replayed;
   unreadable `/data` is never overwritten (the stops it holds are then lost for that start).
 

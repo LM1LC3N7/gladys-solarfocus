@@ -194,8 +194,12 @@ export function fakeSolarfocus({
       while (words.length < count) words.push(0);
       return words;
     },
+    /** The release mode applied (input 502+) follows the one written (32002+), unless frozen. */
+    istFrozen: false,
     apply(address, word) {
       device.holding.set(address, word);
+      const tank = [0, 1, 2, 3].find((k) => address === 32002 + 50 * k);
+      if (tank !== undefined && !device.istFrozen) device.input.set(502 + 50 * tank, word);
     },
     handle(socket, frame) {
       const tid = frame.readUInt16BE(0);
@@ -210,52 +214,56 @@ export function fakeSolarfocus({
       }
       device.log.push(fc === 16 ? { fc, address, count, words } : { fc, address, count });
       if (device.silent.has(address)) return;
-      timers.setTimeout(() => {
-        if (socket.destroyed) {
-          if (fc === 16 && device.applyClosedWrites && !device.ignoreWrites) {
-            device.apply(address, words[0]);
-          }
-          return;
-        }
-        let answer;
-        const exception = device.exceptions.get(address);
-        if (exception) {
-          answer = Buffer.from([fc | 0x80, exception]);
-        } else if (fc === 3 || fc === 4) {
-          const read = device.answerWords(fc, address, count);
-          if (!read) {
-            answer = Buffer.from([fc | 0x80, 2]);
-          } else {
-            answer = Buffer.alloc(2 + count * 2);
-            answer[0] = fc;
-            answer[1] = count * 2;
-            read.forEach((w, i) => answer.writeUInt16BE(w, 2 + i * 2));
-          }
-        } else if (fc === 16) {
-          if (!device.mapped[3].has(address) || count !== 1) {
-            answer = Buffer.from([fc | 0x80, 2]);
-          } else {
-            if (!device.ignoreWrites) {
-              if (device.applyDelay > 0) {
-                timers.setTimeout(() => device.apply(address, words[0]), device.applyDelay);
-              } else {
-                device.apply(address, words[0]);
-              }
+      timers.setTimeout(
+        () => {
+          if (socket.destroyed) {
+            if (fc === 16 && device.applyClosedWrites && !device.ignoreWrites) {
+              device.apply(address, words[0]);
             }
-            answer = Buffer.from(pdu.subarray(0, 5));
-            if (device.badEcho) answer[4] ^= 1;
+            return;
           }
-        } else {
-          answer = Buffer.from([fc | 0x80, 1]);
-        }
-        const out = Buffer.alloc(7 + answer.length);
-        out.writeUInt16BE(device.wrongTransaction ? (tid + 1) & 0xffff : tid, 0);
-        out.writeUInt16BE(0, 2);
-        out.writeUInt16BE(answer.length + 1, 4);
-        out[6] = device.wrongUnit ? (uid + 1) & 0xff : uid;
-        answer.copy(out, 7);
-        socket.emit('data', out);
-      }, device.delay);
+          let answer;
+          let exception = device.exceptions.get(address);
+          if (typeof exception === 'function') exception = exception({ fc, address, count, words });
+          if (exception) {
+            answer = Buffer.from([fc | 0x80, exception]);
+          } else if (fc === 3 || fc === 4) {
+            const read = device.answerWords(fc, address, count);
+            if (!read) {
+              answer = Buffer.from([fc | 0x80, 2]);
+            } else {
+              answer = Buffer.alloc(2 + count * 2);
+              answer[0] = fc;
+              answer[1] = count * 2;
+              read.forEach((w, i) => answer.writeUInt16BE(w, 2 + i * 2));
+            }
+          } else if (fc === 16) {
+            if (!device.mapped[3].has(address) || count !== 1) {
+              answer = Buffer.from([fc | 0x80, 2]);
+            } else {
+              if (!device.ignoreWrites) {
+                if (device.applyDelay > 0) {
+                  timers.setTimeout(() => device.apply(address, words[0]), device.applyDelay);
+                } else {
+                  device.apply(address, words[0]);
+                }
+              }
+              answer = Buffer.from(pdu.subarray(0, 5));
+              if (device.badEcho) answer[4] ^= 1;
+            }
+          } else {
+            answer = Buffer.from([fc | 0x80, 1]);
+          }
+          const out = Buffer.alloc(7 + answer.length);
+          out.writeUInt16BE(device.wrongTransaction ? (tid + 1) & 0xffff : tid, 0);
+          out.writeUInt16BE(0, 2);
+          out.writeUInt16BE(answer.length + 1, 4);
+          out[6] = device.wrongUnit ? (uid + 1) & 0xff : uid;
+          answer.copy(out, 7);
+          socket.emit('data', out);
+        },
+        typeof device.delay === 'function' ? device.delay() : device.delay,
+      );
     },
     connect() {
       const socket = new FakeSocket(device);

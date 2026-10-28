@@ -59,6 +59,40 @@ const SUFFIX_NAMES = {
   },
 };
 
+/** "circuit 1", "hot water tank 1": a component in a sentence. */
+export const componentName = (kind, n) =>
+  kind === 'circuit'
+    ? both(`heating circuit ${n}`, `circuit de chauffage ${n}`)
+    : both(`hot water tank ${n}`, `ballon d’eau chaude ${n}`);
+
+const listOf = (items) =>
+  both(items.map((i) => i.en).join(', '), items.map((i) => i.fr).join(', '));
+
+/** Why a request failed, in both languages (never the bytes received). */
+export function reasonOf(err) {
+  if (err?.reason?.en && err?.reason?.fr) return err.reason;
+  switch (err?.kind) {
+    case 'unreachable':
+      return both('unreachable', 'injoignable');
+    case 'timeout':
+      return both('no answer in time', 'pas de réponse à temps');
+    case 'closed':
+      return both('connection closed', 'connexion fermée');
+    case 'protocol':
+      return both('unexpected answer', 'réponse inattendue');
+    case 'aborted':
+      return both('interrupted', 'interrompue');
+    case 'late':
+      return both('too late', 'trop tard');
+    case 'refused':
+      return Number.isInteger(err.code)
+        ? both(`refused, Modbus exception ${err.code}`, `refusée, exception Modbus ${err.code}`)
+        : both('refused', 'refusée');
+    default:
+      return both('error', 'erreur');
+  }
+}
+
 /** "Heating circuit 1: mode". */
 export const componentFeatureName = (kind, n, suffix) =>
   both(
@@ -148,8 +182,8 @@ export const T = {
     ),
   failing: (reason, wait) =>
     both(
-      `The controller answered badly (${reason}); next try in ${wait.en}.`,
-      `La régulation a mal répondu (${reason}) ; nouvel essai dans ${wait.fr}.`,
+      `The controller answered badly (${reason.en}); next try in ${wait.en}.`,
+      `La régulation a mal répondu (${reason.fr}) ; nouvel essai dans ${wait.fr}.`,
     ),
   missingBlocks: (names) => both(`Not read this time: ${names}.`, `Non lus cette fois : ${names}.`),
   flowSetpoints: (list) =>
@@ -157,11 +191,22 @@ export const T = {
       `A flow setpoint written by another Modbus client is active on circuit ${list}: its mode is not changed by Gladys (a stop still goes).`,
       `Une consigne de départ écrite par un autre client Modbus est active sur le circuit ${list} : Gladys n’en change pas le mode (un arrêt part quand même).`,
     ),
-  stopsPending: (list) =>
-    both(
-      `Stop not confirmed by the controller: ${list}.`,
-      `Arrêt non confirmé par la régulation : ${list}.`,
-    ),
+  stopsPending: (names) => {
+    const list = listOf(names);
+    return both(
+      `Stop not confirmed by the controller: ${list.en}.`,
+      `Arrêt non confirmé par la régulation : ${list.fr}.`,
+    );
+  },
+  stopsElsewhere: (entries) => {
+    const list = listOf(
+      entries.map(([address, name]) => both(`${name.en} (${address})`, `${name.fr} (${address})`)),
+    );
+    return both(
+      `Stop not confirmed on a controller no longer configured, nothing more sent there: ${list.en}.`,
+      `Arrêt non confirmé sur une régulation qui n’est plus configurée, plus rien n’y est envoyé : ${list.fr}.`,
+    );
+  },
   summary: (values) => {
     const state = values.hpState ? HEATPUMP_STATE_NAMES[values.hpState] : undefined;
     const outdoor =
@@ -233,29 +278,33 @@ export const ERRORS = {
   ),
   unknownState: (reason) =>
     both(
-      `The current value could not be read just before (${reason}): command not sent.`,
-      `La valeur actuelle n’a pas pu être relue juste avant (${reason}) : commande non envoyée.`,
+      `The current value could not be read just before (${reason.en}): command not sent.`,
+      `La valeur actuelle n’a pas pu être relue juste avant (${reason.fr}) : commande non envoyée.`,
     ),
   refused: (reason) =>
     both(
-      `The controller refused the command (${reason}): not applied.`,
-      `La régulation a refusé la commande (${reason}) : non appliquée.`,
+      `The controller refused the command (${reason.en}): not applied.`,
+      `La régulation a refusé la commande (${reason.fr}) : non appliquée.`,
     ),
   notSent: (reason) =>
     both(
-      `The controller could not be reached (${reason}): command not sent.`,
-      `La régulation n’a pas pu être jointe (${reason}) : commande non envoyée.`,
+      `The controller could not be reached (${reason.en}): command not sent.`,
+      `La régulation n’a pas pu être jointe (${reason.fr}) : commande non envoyée.`,
     ),
   sentUnconfirmed: (reason) =>
     both(
-      `Command sent, without confirmation (${reason}): check the state of the heating in a minute.`,
-      `Commande envoyée, sans confirmation (${reason}) : vérifiez l’état du chauffage dans une minute.`,
+      `Command sent, without confirmation (${reason.en}): check the state of the heating in a minute.`,
+      `Commande envoyée, sans confirmation (${reason.fr}) : vérifiez l’état du chauffage dans une minute.`,
     ),
   queued: both(
-    'Command waiting its turn behind other commands (a scene): it is sent within 15 s of the click, or not at all; check the state of the heating in a few seconds.',
-    'Commande en attente derrière d’autres commandes (une scène) : elle part dans les 15 s qui suivent le clic, ou pas du tout ; vérifiez l’état du chauffage dans quelques secondes.',
+    'Command waiting its turn behind other commands (a scene): it is sent within 15 s of its turn and 60 s of the click, or not at all; check the state of the heating in a minute.',
+    'Commande en attente derrière d’autres commandes (une scène) : elle part dans les 15 s qui suivent son tour et les 60 s qui suivent le clic, ou pas du tout ; vérifiez l’état du chauffage dans une minute.',
   ),
   noAnswerYet: both('no answer yet', 'pas encore de réponse'),
+  stopIncomplete: both(
+    'the circuit shows off, but not its flow setpoint and cooling at 0',
+    'le circuit est à l’arrêt, mais pas sa consigne de départ ni son rafraîchissement à 0',
+  ),
   readBackDiffers: both(
     'the value read back is not the one asked',
     'la valeur relue n’est pas celle demandée',

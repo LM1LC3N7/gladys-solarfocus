@@ -126,10 +126,7 @@ export function pollBlocks({ generator = 'none', circuits = 0, dhw = 0, buffers 
     );
   }
   for (let n = 1; n <= dhw; n += 1) {
-    blocks.push(
-      { key: `dhw-${n}`, fc: 4, points: [[dhwInput(n), 't', `dhw.${n}.temperature`]] },
-      dhwControlBlock(n),
-    );
+    blocks.push(dhwStateBlock(n), dhwControlBlock(n));
   }
   for (let n = 1; n <= buffers; n += 1) {
     const b = bufferInput(n);
@@ -172,18 +169,27 @@ export function circuitControlBlocks(n) {
   ];
 }
 
-/** 32000 setpoint, 32001 one-time charge (read, never written), 32002 release mode. */
-export function dhwControlBlock(n) {
-  const h = dhwHolding(n);
+/**
+ * Input 500: temperature, 501 state (read, not shown yet), 502 release mode
+ * as the controller applies it ("Freigabeart – Ist"): the mode shown, decided
+ * on and confirmed. The mode is written to holding 32002 ("Soll").
+ */
+export function dhwStateBlock(n) {
+  const i = dhwInput(n);
   return {
-    key: `dhw-${n}-control`,
-    fc: 3,
+    key: `dhw-${n}`,
+    fc: 4,
     points: [
-      [h, 't', `dhw.${n}.setpoint`],
-      [h + 1, 'u', `dhw.${n}.oneTimeCharge`],
-      [h + 2, 'u', `dhw.${n}.mode`],
+      [i, 't', `dhw.${n}.temperature`],
+      [i + 1, 'u', `dhw.${n}.state`],
+      [i + 2, 'u', `dhw.${n}.mode`],
     ],
   };
+}
+
+/** Holding 32000: the hot water setpoint (read, written). */
+export function dhwControlBlock(n) {
+  return { key: `dhw-${n}-control`, fc: 3, points: [[dhwHolding(n), 't', `dhw.${n}.setpoint`]] };
 }
 
 /** Register 32603 + 50 (n-1), "Heizkreisbetriebsart" (document: 0 to 3). */
@@ -194,7 +200,7 @@ export const CIRCUIT_MODES = {
   3: 'off',
 };
 
-/** Register 32002 + 50 (n-1), "Boiler – Freigabeart" (document: 0 to 4). */
+/** Registers 502 + 50 (n-1) (read) and 32002 + 50 (n-1) (written), "Boiler – Freigabeart" (0 to 4). */
 export const DHW_MODES = {
   0: 'always-off',
   1: 'always-on',
@@ -369,8 +375,14 @@ export const TIMINGS = {
   commandReadMax: 1_500,
   commandMinRead: 300,
   commandMinSend: 300,
-  /** A command waiting its turn (a scene setting several values) starts within 15 s, or never. */
+  /**
+   * A command waiting its turn (a scene setting several values) starts within
+   * 15 s of the start of its turn and 60 s of its arrival, or never.
+   */
   queueWindow: 15 * SECOND,
+  queueMax: MINUTE,
+  /** A poll goes on after this many blocks without an answer (each on a new connection), then stops. */
+  readTimeouts: 2,
   /** The configuration could not be read from Gladys: tried again this often. */
   configRetry: 30 * SECOND,
   /**

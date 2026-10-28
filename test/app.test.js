@@ -2,13 +2,15 @@
 // The integration end to end: fake Gladys, fake eco manager-touch, virtual clock.
 // Circuit 1: input 1100, holding 32600 (flow setpoint), 32602 (cooling),
 // 32603 (mode), 32605 (room setpoint), 32608 (heating mode). Hot water tank
-// 1: input 500, holding 32000 (setpoint), 32002 (mode).
+// 1: input 500 (temperature), 502 (release mode applied), holding 32000 (setpoint),
+// 32002 (release mode written).
 // -----------------------------------------------------------------------------
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEVICE_TRANSPORTS } from '@gladysassistant/integration-sdk';
 import { memoryStore } from '../src/store.js';
+import { guardKey } from '../src/app.js';
 import { ALLOW, CFG, DEVICE, MINUTE, SECOND, feature, setup } from './helpers.js';
 import { HOST, NOW, fakeSolarfocus } from './fixtures/fakeSolarfocus.js';
 import { testClock } from './kit/clock.mjs';
@@ -219,7 +221,7 @@ test('a firmware without heating mode (before 22.090): the mode written without 
   assert.ok(!device.writes().some((w) => w.address === 32608), 'never written');
 });
 
-test('a stop before any read writes the heating mode of the document (2)', async (t) => {
+test('a stop before any read: the heating mode read after the mode, written back as it is', async (t) => {
   const clock = testClock({ start: NOW });
   const device = fakeSolarfocus({ timers: clock.timers });
   device.down = true;
@@ -232,8 +234,13 @@ test('a stop before any read writes the heating mode of the document (2)', async
     [32603, 3],
     [32600, 0],
     [32602, 0],
-    [32608, 2],
+    [32608, 0],
   ]);
+  assert.ok(
+    device.log.findIndex((r) => r.fc === 3 && r.address === 32608) >
+      device.log.findIndex((r) => r.fc === 16 && r.address === 32603),
+    'read after the mode was written',
+  );
 });
 
 test('a flow setpoint of another Modbus client: never overridden by a mode, a stop still goes', async (t) => {
@@ -469,7 +476,7 @@ test('a value set elsewhere after a stop: lifted once read twice in a row, never
   t.after(ctx.stop);
   ctx.device.ignoreWrites = true;
   await ctx.press('dhw-1-mode', 'always-off');
-  ctx.device.set('holding', 32002, 1); // always on, set at the panel
+  ctx.device.set('input', 502, 1); // always on, set at the panel
   // The check at 15 s is too early (the time to apply it); the follow-up read at 25 s
   // reads it once, the check at 30 s twice.
   await ctx.advance(21 * SECOND, 200);
@@ -571,14 +578,14 @@ test('before the configuration is read, a stop goes to the last controller read'
     lastAttemptAt: NOW,
     stops: [],
     target: { host: HOST, port: 502, unitId: 1 },
-    heatingModes: { 1: 1 },
   });
+  device.set('holding', 32608, 1);
   const ctx = await setup({ clock, device, store, boot: true, getConfigFails: 100, create: false });
   t.after(ctx.stop);
   const ack = await ctx.press('circuit-1-mode', 'off');
   assert.equal(ack.success, true, String(ack.error));
   assert.equal(holding(ctx, 32603), 3);
-  assert.equal(holding(ctx, 32608), 1, 'the heating mode kept in /data');
+  assert.equal(holding(ctx, 32608), 1, 'the heating mode read and written back as it is');
 });
 
 // --- Configuration, reads, restarts, /data ----------------------------------------
@@ -919,7 +926,7 @@ async function until(ctx, cond, max = 60 * SECOND) {
 }
 
 const checkRunning = (ctx, register) =>
-  ctx.app.checking === register && ctx.app.active?.kind === 'check';
+  ctx.app.checking === guardKey(ctx.app.target(), register) && ctx.app.active?.kind === 'check';
 
 for (const kase of ['panel value', 'resends used up']) {
   test(`a click during a running check is written and read back (${kase})`, async (t) => {
@@ -927,8 +934,8 @@ for (const kase of ['panel value', 'resends used up']) {
     t.after(ctx.stop);
     ctx.device.ignoreWrites = true;
     await ctx.press('dhw-1-mode', 'always-off');
-    if (kase === 'panel value') ctx.device.set('holding', 32002, 4);
-    else ctx.app.stopGuards.get(32002).reasserts = 2;
+    if (kase === 'panel value') ctx.device.set('input', 502, 4);
+    else ctx.app.guardOf(32002).reasserts = 2;
     ctx.device.delay = 1000;
     await until(ctx, () => checkRunning(ctx, 32002));
     ctx.device.ignoreWrites = false;
@@ -942,7 +949,7 @@ for (const kase of ['panel value', 'resends used up']) {
       'written',
     );
     assert.ok(
-      after.some((r) => r.fc === 3 && r.address === 32002),
+      after.some((r) => r.fc === 4 && r.address === 502),
       'read back',
     );
     assert.equal(holding(ctx, 32002), 0);
@@ -1081,7 +1088,7 @@ test('a stop over a command sent without confirmation: guarded until confirmed t
   await ctx.advance(21 * SECOND, 200);
   assert.equal(store.data.stops.length, 1, 'one confirmation is not enough');
   // The command lands late: the check at 30 s sends the stop again over it.
-  ctx.device.set('holding', 32002, 1);
+  ctx.device.apply(32002, 1);
   await ctx.advance(6 * SECOND, 200);
   assert.equal(holding(ctx, 32002), 0);
   assert.equal(writesTo(ctx.device, 32002).filter((w) => w.words[0] === 0).length, 2);
@@ -1100,29 +1107,262 @@ test('the heating mode refused by the firmware during a stop: the stop still goe
   assert.equal(ack.success, true, String(ack.error));
   assert.deepEqual(
     device.writes().map((w) => w.address),
-    [32603, 32600, 32602, 32608],
+    [32603, 32600, 32602],
   );
   assert.equal(holding(ctx, 32603), 3);
-  assert.ok(ctx.lines.some((l) => /register 32608 of the stop refused/.test(l)));
+  // Refused once: this firmware has none, it is not asked again.
+  assert.equal((await ctx.press('circuit-1-mode', 'off')).success, true);
+  assert.equal(device.reads().filter((r) => r.address === 32608).length, 1);
 });
 
-test('the heating modes kept for the stops belong to the controller they were read on', async (t) => {
+// --- Review r1 (lot 18) -------------------------------------------------------------
+
+test('r1-I1 a stop answered "busy" (exception 6) is tried again within its 3 s', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  let busy = 1;
+  ctx.device.exceptions.set(32603, (r) => (r.fc === 16 && busy-- > 0 ? 6 : undefined));
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.equal(writesTo(ctx.device, 32603).length, 2);
+  assert.equal(holding(ctx, 32603), 3);
+});
+
+test('r1-I1 a stop write without an answer is tried again within its 3 s', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.silent.add(32603);
+  const ack = ctx.fire('circuit-1-mode', 'off');
+  await ctx.advance(2100, 20);
+  ctx.device.silent.delete(32603);
+  await ctx.advance(3 * SECOND, 50);
+  assert.equal(holding(ctx, 32603), 3, 'applied within the budget');
+  assert.equal(writesTo(ctx.device, 32603).length, 2);
+  await ack;
+});
+
+test('r1-I1 a stop queued behind another one has its own 3 s', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.down = true;
+  const first = ctx.fire('circuit-1-mode', 'off');
+  await ctx.advance(100, 10);
+  const second = ctx.fire('dhw-1-mode', 'always-off');
+  // The first one tries until 3 s; the controller is back at 3.2 s, during the second's turn.
+  await ctx.advance(3100, 20);
+  ctx.device.down = false;
+  await ctx.advance(5 * SECOND, 50);
+  await Promise.all([first, second]);
+  assert.equal(holding(ctx, 32002), 0, 'the second stop went');
+});
+
+test('r1-I1 a controller busy for 2 minutes: the refused resends do not count, the stop goes', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  const until = ctx.clock.elapsed + 2 * MINUTE;
+  ctx.device.exceptions.set(32603, (r) =>
+    r.fc === 16 && ctx.clock.elapsed < until ? 6 : undefined,
+  );
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, false);
+  assert.match(String(ack.error), /exception Modbus 6/, 'the reason in French');
+  await ctx.advance(10 * MINUTE, 1000);
+  assert.equal(holding(ctx, 32603), 3);
+  assert.equal(ctx.app.stopGuards.size, 0);
+});
+
+test('r1-I2 a circuit stop cut after its mode is completed later, never confirmed on the mode alone', async (t) => {
   const store = memoryStore();
   const ctx = await setup({ store });
   t.after(ctx.stop);
-  assert.deepEqual(store.data.heatingModes, { 1: 0 });
-  assert.deepEqual(store.data.target, { host: HOST, port: 502, unitId: 1 });
-  ctx.device.down = true;
-  const saved = ctx.app.configUpdated({ ...CFG, host: '192.168.1.71' });
-  await ctx.advance(5 * SECOND, 100);
+  ctx.device.set('holding', 32600, 450); // another client's flow setpoint
+  ctx.device.silent.add(32600);
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, false);
+  ctx.device.silent.delete(32600);
+  assert.equal(holding(ctx, 32603), 3);
+  assert.equal(holding(ctx, 32600), 450, 'cut after the mode');
+  assert.equal(store.data.stops.length, 1, 'not confirmed by the mode alone');
+  await ctx.advance(40 * SECOND, 200);
+  assert.equal(holding(ctx, 32600), 0, 'the group written again by a check');
+  assert.equal(holding(ctx, 32602), 0);
+  await ctx.advance(30 * SECOND, 200);
+  assert.deepEqual(store.data.stops, []);
+});
+
+test('r1-I2 a register of the group refused and still wrong: the group is written again in the 3 s', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.set('holding', 32602, 1);
+  let refused = 1;
+  ctx.device.exceptions.set(32602, (r) => (r.fc === 16 && refused-- > 0 ? 6 : undefined));
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.equal(holding(ctx, 32602), 0);
+  assert.equal(writesTo(ctx.device, 32602).length, 2);
+});
+
+test('r1-I3 a stop of a controller no longer configured: never checked nor written, shown', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  const hosts = [];
+  device.connectFn = (host) => {
+    hosts.push(host);
+    return device.connect();
+  };
+  const store = memoryStore();
+  const ctx = await setup({ clock, device, store });
+  t.after(ctx.stop);
+  device.ignoreWrites = true;
+  await ctx.press('circuit-1-mode', 'off');
+  device.ignoreWrites = false;
+  const other = { ...CFG, host: '192.168.1.71' };
+  const saved = ctx.app.configUpdated(other);
+  await ctx.advance(2 * SECOND, 50);
   await saved;
-  const other = { host: '192.168.1.71', port: 502, unitId: 1 };
-  assert.equal(ctx.app.heatingModeFor(1, other), undefined, 'never read there');
-  assert.equal(ctx.app.heatingModeFor(1, { host: HOST, port: 502, unitId: 1 }), 0);
-  // Read there: the modes of the former controller are dropped.
+  const from = hosts.length;
+  const written = device.writes().length;
+  // The new controller shows another mode, read twice and more: not the old controller's.
+  device.set('holding', 32603, 0);
+  await ctx.advance(5 * MINUTE, 1000);
+  assert.deepEqual([...new Set(hosts.slice(from))], ['192.168.1.71'], 'never the old address');
+  assert.equal(device.writes().length, written, 'nothing written');
+  assert.equal(store.data.stops.length, 1, 'kept for the old controller');
+  assert.match(ctx.gladys.fake.connectionStatus.message.fr, /plus configurée.*192\.168\.1\.70/);
+  // The old controller configured again: its stop is checked and sent again.
+  device.set('holding', 32603, 2);
+  const back = ctx.app.configUpdated(CFG);
+  await ctx.advance(30 * SECOND, 100);
+  await back;
+  assert.equal(holding(ctx, 32603), 3);
+});
+
+test('r1-I4 a block without an answer: the others read, connected, the block named', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  device.silent.add(32608);
+  const ctx = await setup({ clock, device });
+  t.after(ctx.stop);
+  assert.equal(ctx.gladys.fake.connectionStatus.connected, true);
+  assert.match(
+    ctx.gladys.fake.connectionStatus.message.fr,
+    /Non lus cette fois : circuit-1-heating-mode/,
+  );
+  assert.equal(ctx.state('temperature-outdoor').state, 4.5);
+  assert.equal(ctx.state('buffer-1-temperature-top').state, 55.1, 'read after it');
+  assert.equal(ctx.device.maxOpen, 1);
+});
+
+test('r1-I4 two blocks without an answer: what was read is kept, the rest skipped', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  device.silent.add(32608);
+  device.silent.add(32605);
+  const ctx = await setup({ clock, device });
+  t.after(ctx.stop);
+  assert.equal(ctx.gladys.fake.connectionStatus.connected, true);
+  assert.equal(ctx.state('heatpump-temperature-flow').state, 35.2);
+  assert.match(ctx.gladys.fake.connectionStatus.message.fr, /buffer-1/);
+});
+
+test('r1-I5 a scene of three circuit modes and two more on a slow controller sets them all', async (t) => {
+  const ctx = await setup({ config: { ...ALLOW, heating_circuits: 4, dhw_tanks: 2 } });
+  t.after(ctx.stop);
+  for (const h of [32603, 32653, 32703]) ctx.device.set('holding', h, 2);
+  ctx.device.set('holding', 32050, 450);
+  let i = 0;
+  ctx.device.delay = () => 500 + ((i++ * 137) % 400);
+  const acks = [
+    ctx.fire('circuit-1-mode', 'continuous'),
+    ctx.fire('circuit-2-mode', 'setback'),
+    ctx.fire('circuit-3-mode', 'continuous'),
+    ctx.fire('dhw-1-setpoint', 55),
+    ctx.fire('dhw-2-mode', 'always-on'),
+  ];
+  await ctx.advance(70 * SECOND, 50);
+  await Promise.all(acks);
+  assert.equal(holding(ctx, 32603), 0);
+  assert.equal(holding(ctx, 32653), 1);
+  assert.equal(holding(ctx, 32703), 0);
+  assert.equal(holding(ctx, 32000), 550);
+  assert.equal(holding(ctx, 32052), 1);
+});
+
+test('r1-I6 the hot water mode is decided and confirmed on the mode applied (502)', async (t) => {
+  const store = memoryStore();
+  const ctx = await setup({ config: ALLOW, store });
+  t.after(ctx.stop);
+  ctx.device.istFrozen = true;
+  const ack = await ctx.press('dhw-1-mode', 'always-on');
+  assert.equal(ack.success, false, '32002 took it, 502 did not move');
+  assert.match(String(ack.error), /sans confirmation/);
+  const stop = await ctx.press('dhw-1-mode', 'always-off');
+  assert.equal(stop.success, false, 'a stop not applied is not confirmed');
+  assert.equal(store.data.stops.length, 1);
+  // Written as 0 already: not "already so" while 502 still shows 2.
+  ctx.device.set('holding', 32002, 0);
+  ctx.device.istFrozen = false;
+  await ctx.press('dhw-1-mode', 'always-off');
+  assert.equal(ctx.device.get('input', 502), 0);
+  assert.equal(ctx.state('dhw-1-mode').text, 'always-off');
+});
+
+test('r1-m2 a block answered once then refused as "illegal address" is not taken as absent', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.exceptions.set(32608, 2);
+  await ctx.advance(61 * SECOND, 500);
+  ctx.device.exceptions.delete(32608);
+  const reads = ctx.device.reads().filter((r) => r.address === 32608).length;
+  await ctx.advance(61 * SECOND, 500);
+  assert.equal(ctx.device.reads().filter((r) => r.address === 32608).length, reads + 1);
+});
+
+test('r1-m4 the status names the stops not confirmed plainly', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.ignoreWrites = true;
+  await ctx.press('circuit-1-mode', 'off');
+  await ctx.press('dhw-1-mode', 'always-off');
+  assert.match(
+    ctx.gladys.fake.connectionStatus.message.fr,
+    /Arrêt non confirmé par la régulation : circuit de chauffage 1, ballon d’eau chaude 1\./,
+  );
+});
+
+test('r1-m5 the guard of a click is in /data before its first write', async (t) => {
+  const store = memoryStore();
+  const ctx = await setup({ store });
+  t.after(ctx.stop);
+  ctx.device.down = true;
+  ctx.fire('circuit-1-mode', 'off');
+  await ctx.advance(100, 10);
+  assert.deepEqual(
+    store.data.stops.map((s) => [s.register, s.written]),
+    [[32603, false]],
+  );
   ctx.device.down = false;
-  ctx.device.set('holding', 32608, 1);
-  await ctx.advance(6 * MINUTE, 1000);
-  assert.deepEqual(store.data.target, other);
-  assert.deepEqual(store.data.heatingModes, { 1: 1 });
+  await ctx.advance(5 * SECOND, 50);
+});
+
+test('r1-m1 a heating mode without an answer never keeps a circuit stop from its confirmation', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  device.silent.add(32608);
+  const ctx = await setup({ clock, device });
+  t.after(ctx.stop);
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.equal(holding(ctx, 32603), 3);
+  assert.equal(ctx.app.stopGuards.size, 0);
+});
+
+test('r1-I1 a stop whose read back is refused is "without confirmation", never "refused"', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.exceptions.set(32600, (r) => (r.fc === 3 ? 3 : undefined));
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, false);
+  assert.match(String(ack.error), /sans confirmation/);
+  assert.equal(holding(ctx, 32603), 3);
 });

@@ -22,7 +22,19 @@ to date at the end of every milestone.
       the time), test button, docs en/fr, cover. Tested against a fake
       controller only (virtual clock, compaction of reads across a hole, and a
       real-clock test x20 on a local TCP server).
-- [ ] **Review r1** (xhigh).
+- [x] **Review r1** (xhigh, REFUSÉ, 2026-10-28): fixed in "Fix r1 review": stops
+      retried within their 3 s on exceptions 4-6 and counted as resends only
+      when acknowledged (I1); a circuit stop confirmed by mode 3, flow setpoint
+      0 and cooling 0, else written again (I2); guards of a controller no longer
+      configured put aside, shown, never written (I3); a block without an
+      answer skipped on a new connection (I4); a scene's commands get 15 s from
+      their turn, 60 s from the click, and a circuit mode is 9 requests (I5);
+      hot water mode read from 502 (Ist) (I6); 32608 read after the mode and
+      written back as is, no more memory of it (m1); tests for the mutants
+      (m2); reasons translated (m3); readable names in the status (m4); the
+      guard in /data before the first write (m5). Tests named `r1-…`; the
+      reviewer's scenarios S1-S13 pass.
+- [ ] **Review r2**.
 - [ ] **Milestone 2 — real controller**: run against a real eco manager-touch
       (see "To check").
 - [ ] **Milestone 3 — more**: energy counters of the vampair (2310-2328, int32
@@ -102,15 +114,21 @@ to date at the end of every milestone.
   switch. No EEPROM quota (the document says nothing of one).
 - **§ 6.2, a circuit's registers written together**: a mode is written as
   32600 = 0, 32602 = 0, 32608 = as read (when the firmware has it), then
-  32603 = the mode (the mode last: a group cut short changes nothing); a stop
-  as 32603 = 3 first, then 32600 = 0, 32602 = 0, 32608 = last read (2, the
-  document's example, when never read; skipped when the firmware has none,
-  remembered from the reads or from a refusal). The integration never writes
-  a flow setpoint (the document: no timeout, and in cooling the dew point
+  32603 = the mode (the mode last: a group cut short changes nothing), read
+  back as mode, flow setpoint 0 and cooling 0; a stop as 32603 = 3 first,
+  then 32600 = 0, 32602 = 0, then 32608 read at that moment and written back
+  as it is (nothing when refused or without an answer: the next tries go
+  without it), confirmed only by mode 3, flow setpoint 0 and cooling 0 read
+  back (else PARTIAL: written again). The integration never writes a flow
+  setpoint (the document: no timeout, and in cooling the dew point
   monitoring of the controller is off) nor cooling; a mode change is refused
   while another Modbus client's flow setpoint is active (never overridden;
   the stop writes 0 as the document does). `writeRequest` refuses any other
   register or value (whitelist with bounds, hot water ≤ 65 °C).
+- **Hot water mode** (review r1): written to 32002 (Soll), shown, decided and
+  confirmed on input 502 (Ist, what the controller applies), as
+  home-assistant-solarfocus does. The circuit mode has no Ist register: to
+  check on a real controller that 32603 follows a change at the display.
 - **Stops** (the lot 17 rules): a click is its own job, always written then
   read back, queued before everything, ending any read, command or check on
   the line; commands that arrived before it and have not left are dropped.
@@ -135,13 +153,22 @@ to date at the end of every milestone.
   "never sooner" clamp of `schedule` (every caller already waits the
   interval, `firstWait` or the due time), `startedAt <= lastSentAt` (the line
   lock keeps writes out of a read). 31 other mutants of the guards are killed
-  by a test (scratchpad script of the lot 18 session).
+  by a test (scratchpad script of the lot 18 session; r1: 35 mutants, all
+  killed but the three above).
 - **Identity**: no serial or version register over Modbus: the device id is
   the integration's; another device at the same address is not detected
   (documented). `save()` in /data does not gate the commands: no command guard
   is persisted (only stops, which are never refused).
-- **Not done in v1**: a timeout on any block ends the session (a late answer
-  is never taken for the next request) and fails that poll; a guard of a
-  controller no longer configured keeps being checked (15 s while unsent).
+- **Blocks without an answer** (review r1): the session is closed (a late
+  answer is never taken for the next request), the block noted in the
+  status, and the poll goes on with the next block over a new connection,
+  twice per poll at most; what was read is kept.
+- **Guards of another controller** (review r1): keyed by controller and
+  register; once a configuration names another controller, a guard of the
+  former one is put aside (no connection, no write, shown in the status) and
+  resumes if it is configured again; before the configuration is read (a
+  restart), every guard is checked.
+- **Scenes** (review r1): a command starts within 15 s of the start of its
+  turn and 60 s of its arrival.
 - No `keywords` or `countries` in the manifest (AT, DE would fit; left out
   per the lot rules). Category: `climate`.

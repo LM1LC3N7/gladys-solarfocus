@@ -56,15 +56,17 @@ connexion » relit la régulation, jamais plus souvent que l’intervalle.
 - Avec une chaudière à granulés ou à bois : la température de la chaudière.
 - Pour chaque circuit configuré : mode (permanent, réduit, automatique, arrêt), consigne ambiante,
   températures de départ et ambiante.
-- Pour chaque ballon d’eau chaude : mode de libération (toujours arrêté, toujours en marche,
-  programmes), consigne et température.
+- Pour chaque ballon d’eau chaude : mode de libération appliqué (registre 502 : toujours arrêté,
+  toujours en marche, programmes), consigne et température.
 - Pour chaque ballon tampon : températures haut et bas.
 
 Une fonctionnalité de mesure n’apparaît qu’une fois qu’une valeur en a été lue. Ne sont jamais publiées
 comme des mesures : les valeurs d’un capteur non branché (130,0, 270,0 ou 350,0 °C), une température
 d’exactement 0,0 °C (ce que lit un composant absent ; sauf la température extérieure, où 0,0 °C est
 réel), une consigne ambiante 0 (aucune consigne venue du Modbus), un mode ou un état hors de la liste de
-Solarfocus, une valeur hors plage. Les compteurs d’énergie ne sont pas encore publiés.
+Solarfocus, une valeur hors plage. Un bloc de registres sans réponse est sauté (la lecture continue
+sur une nouvelle connexion, deux fois au plus par relevé) et le statut le nomme. Les compteurs
+d’énergie ne sont pas encore publiés.
 
 ## Les commandes
 
@@ -81,7 +83,9 @@ Désactivées par défaut. Avec « Autoriser les commandes », Gladys peut chang
 Le mode d’un circuit s’écrit comme Solarfocus le demande (§ 6.2 de sa documentation : tous les
 registres du circuit ensemble) : consigne de départ 0 (la courbe de chauffe de la régulation
 s’applique), rafraîchissement 0, mode chauffage/rafraîchissement tel que relu (logiciel 22.090 ou plus
-récent ; un logiciel plus ancien n’en a pas), puis le mode. L’intégration n’envoie **jamais** de
+récent ; un logiciel plus ancien n’en a pas), puis le mode ; la relecture vérifie le mode, la
+consigne de départ et le rafraîchissement. Le mode d’un ballon s’écrit dans le registre 32002 et se
+relit dans le registre 502, le mode que la régulation applique. L’intégration n’envoie **jamais** de
 consigne de départ et ne met **jamais** un circuit en rafraîchissement : la surveillance du point de
 rosée de la régulation reste active. Si un autre client Modbus (Loxone…) a écrit une consigne de départ
 sur un circuit, Gladys n’en change pas le mode (le statut le signale) ; l’arrêt, lui, part quand même.
@@ -102,7 +106,8 @@ consigne de départ).
 
 Les commandes passent une par une, dans leur ordre d’arrivée, sur une seule connexion. Une scène qui
 règle plusieurs valeurs les règle toutes : une commande qui attend son tour au-delà de 3,5 s reçoit la
-réponse « en attente » et part dans les 15 s qui suivent le clic, ou pas du tout.
+réponse « en attente » et part dans les 15 s qui suivent le début de son tour et les 60 s qui suivent
+le clic, ou pas du tout.
 
 ## Les arrêts
 
@@ -111,17 +116,25 @@ Mettre un circuit sur **Arrêt** (hors gel seulement) ou un ballon sur **Toujour
 régulation pas encore lue, ni d’une commande en attente, ni de `/data` impossible à écrire. Un arrêt
 passe devant tout ; toutes les commandes arrivées avant lui et pas encore parties sont abandonnées.
 L’arrêt d’un circuit écrit ce que Solarfocus documente (§ 6.2.3), le mode d’abord : mode 3, consigne de
-départ 0, rafraîchissement 0, puis le mode chauffage/rafraîchissement dernier lu (2, la valeur de la
-documentation, s’il n’a jamais été lu ; rien sur un logiciel qui n’en a pas). Une connexion refusée est
-réessayée toutes les 250 ms pendant 3 s ; Gladys a sa réponse en 3,5 s au plus.
+départ 0, rafraîchissement 0, puis le mode chauffage/rafraîchissement, relu à ce moment et réécrit tel
+quel (rien sur un logiciel qui n’en a pas, ou s’il ne peut pas être relu). Il n’est confirmé que si la
+relecture montre le mode 3, la consigne de départ 0 et le rafraîchissement 0 ; un ballon, que si le
+mode appliqué (registre 502) est « toujours arrêté ». Pendant 3 s, l’arrêt est réessayé toutes les
+250 ms (les écritures se répètent sans effet de bord) quand la connexion est refusée ou coupée, qu’une
+réponse manque ou est fausse, que la régulation répond une exception Modbus autre que 1 à 3 (occupée,
+défaillance : rien appliqué), ou qu’un registre du circuit a été refusé et que la relecture le montre ;
+ces 3 s comptent depuis le début de son tour (un arrêt en file derrière un autre les a toutes). Gladys
+a sa réponse en 3,5 s au plus. La garde est dans `/data` avant la première écriture.
 
 Un arrêt non confirmé est gardé dans `/data` avec les valeurs lues avant lui. L’intégration vérifie la
 régulation toutes les 15 s, quel que soit l’intervalle de rafraîchissement : un arrêt qui n’a pas pu
-partir est retenté à chaque vérification ; un arrêt écrit mais pas encore visible est renvoyé (3 fois
-au plus, 20 s au moins après l’envoi) tant que la régulation montre une valeur d’avant. Après ces 3
-renvois, la régulation est relue toutes les 5 minutes, sans écrire, et le statut affiche « Arrêt non
-confirmé » jusqu’à ce que l’arrêt se voie ou que la garde soit levée. Cette garde n’est **jamais**
-levée par le temps, seulement :
+partir est retenté à chaque vérification ; un arrêt écrit mais pas encore visible (ou un circuit à
+l’arrêt sans sa consigne de départ ni son rafraîchissement à 0) est renvoyé, 20 s au moins après
+l’envoi, tant que la régulation montre une valeur d’avant ; seuls comptent les renvois que la
+régulation a acquittés, 3 au plus (un renvoi qu’elle refuse est retenté à la vérification suivante).
+Après ces 3 renvois, la régulation est relue toutes les 5 minutes, sans écrire, et le statut affiche
+« Arrêt non confirmé » jusqu’à ce que l’arrêt se voie ou que la garde soit levée. Cette garde n’est
+**jamais** levée par le temps, seulement :
 
 - par une lecture qui montre l’arrêt (deux lectures de suite, après le délai d’application, si une
   commande envoyée avant l’arrêt pouvait encore arriver) ;
@@ -130,23 +143,29 @@ levée par le temps, seulement :
   jamais écrasée. Pour un arrêt cliqué avant toute lecture, la première valeur relue après lui compte
   comme valeur d’avant ; une valeur d’avant inconnue ne vaut jamais « changé ailleurs ».
 
+Si la configuration désigne une autre régulation (nouvelle adresse, autre appareil), la garde d’un
+arrêt de l’ancienne est mise de côté : plus rien n’est envoyé ni lu à son adresse, le statut l’affiche
+(« Arrêt non confirmé sur une régulation qui n’est plus configurée »), et elle reprend si cette
+régulation est de nouveau configurée. Avant que la configuration soit lue (au redémarrage), elle est
+vérifiée comme les autres.
+
 Une vérification n’interrompt jamais une commande : elle attend derrière les commandes (plus récentes
 qu’elle) et n’écrit jamais par-dessus ; un nouveau clic sur un arrêt interrompt une vérification et est
-écrit puis relu comme un premier clic. Après un redémarrage, la vérification part aussitôt, avant même de lire la
-configuration.
+écrit puis relu comme un premier clic. Après un redémarrage, la vérification part aussitôt, avant même
+de lire la configuration.
 
 Un arrêt peut échouer ou ne pas être renvoyé dans ces cas :
 
 - aucune adresse valide dans la configuration (ou, avant que la configuration soit lue, aucune
   régulation lue auparavant) : refusé, rien n’est envoyé ;
-- la régulation reste injoignable pendant 3 s : « non envoyé », puis retenté toutes les 15 s (et au
-  redémarrage) ;
-- la régulation répond une exception Modbus sur le registre du mode : « refusée » ou « envoyée, sans
-  confirmation » selon le code (une exception sur les autres registres du circuit est notée dans le
-  journal, l’arrêt continue) ;
-- la relecture ne montre pas encore l’arrêt : « envoyée, sans confirmation » ;
+- la régulation reste injoignable ou occupée pendant 3 s : « non envoyé » ou « envoyée, sans
+  confirmation », puis retenté toutes les 15 s (et au redémarrage) ;
+- la régulation refuse le mode lui-même (exception Modbus 1 à 3) : « refusée » ; une exception sur les
+  autres registres du circuit est notée dans le journal et l’arrêt continue ;
+- la relecture ne montre pas encore l’arrêt complet, ou ne peut pas être lue : « envoyée, sans
+  confirmation » ;
 - il n’est plus renvoyé après une autre valeur lue deux fois de suite, une commande plus récente de
-  Gladys partie, ou 3 renvois ;
+  Gladys partie, ou 3 renvois acquittés ; ni vers une régulation qui n’est plus configurée ;
 - `/data` contient un arrêt cliqué « dans le futur » (horloge revenue en arrière) : il est invalide et
   n’est pas rejoué ; `/data` illisible n’est jamais écrasé (les arrêts qu’il contient sont alors
   perdus pour ce démarrage).
