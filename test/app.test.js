@@ -1228,12 +1228,15 @@ test('r1-I3 a stop of a controller no longer configured: never checked nor writt
   assert.deepEqual([...new Set(hosts.slice(from))], ['192.168.1.71'], 'never the old address');
   assert.equal(device.writes().length, written, 'nothing written');
   assert.equal(store.data.stops.length, 1, 'kept for the old controller');
+  assert.equal(store.data.stops[0].dormant, true, 'put aside, in /data');
   assert.match(ctx.gladys.fake.connectionStatus.message.fr, /plus configurée.*192\.168\.1\.70/);
   // The old controller configured again: its stop is checked and sent again.
   device.set('holding', 32603, 2);
   const back = ctx.app.configUpdated(CFG);
-  await ctx.advance(30 * SECOND, 100);
+  await ctx.advance(2 * SECOND, 100);
   await back;
+  assert.notEqual(store.data.stops[0]?.dormant, true, 'checked again at once');
+  await ctx.advance(30 * SECOND, 100);
   assert.equal(holding(ctx, 32603), 3);
 });
 
@@ -1365,4 +1368,119 @@ test('r1-I1 a stop whose read back is refused is "without confirmation", never "
   assert.equal(ack.success, false);
   assert.match(String(ack.error), /sans confirmation/);
   assert.equal(holding(ctx, 32603), 3);
+});
+
+// --- Review r2 (lot 18) -------------------------------------------------------------
+
+test('r2-I7 a guard put aside is neither read nor written at a restart', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  const hosts = [];
+  device.connectFn = (host) => {
+    hosts.push(host);
+    return device.connect();
+  };
+  const kept = { host: HOST, port: 502, unitId: 1, register: 32603, at: NOW - MINUTE };
+  const store = memoryStore({
+    lastAttemptAt: NOW - 10 * SECOND,
+    stops: [{ ...kept, written: true, dormant: true, before: ['automatic'] }],
+  });
+  const ctx = await setup({
+    clock,
+    device,
+    store,
+    boot: true,
+    getConfigFails: 100,
+    create: false,
+  });
+  t.after(ctx.stop);
+  await ctx.advance(2 * MINUTE, 500);
+  assert.deepEqual(hosts, [], 'never connected');
+  assert.deepEqual(device.writes(), []);
+  assert.equal(store.data.stops[0].dormant, true);
+});
+
+test('r2-I7 the configuration arriving during the read of a restart check: nothing written', async (t) => {
+  const clock = testClock({ start: NOW });
+  const device = fakeSolarfocus({ timers: clock.timers });
+  device.delay = 400;
+  const store = memoryStore({
+    lastAttemptAt: NOW - 10 * SECOND,
+    stops: [
+      {
+        host: HOST,
+        port: 502,
+        unitId: 1,
+        register: 32603,
+        at: NOW - MINUTE,
+        written: true,
+        before: ['automatic'],
+      },
+    ],
+  });
+  // The configuration names another controller; it arrives while the check reads.
+  const ctx = await setup({
+    clock,
+    device,
+    store,
+    boot: true,
+    create: false,
+    config: { ...CFG, host: '192.168.1.71' },
+  });
+  t.after(ctx.stop);
+  await ctx.advance(MINUTE, 200);
+  assert.deepEqual(device.writes(), [], 'the resend gave way');
+  assert.equal(store.data.stops[0]?.dormant, true);
+});
+
+test('r2-m6 a read back refused after an acknowledged group: only the read is tried again', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  let busy = 2;
+  ctx.device.exceptions.set(32602, (r) => (r.fc === 3 && busy-- > 0 ? 6 : undefined));
+  const ack = await ctx.press('circuit-1-mode', 'off');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.equal(writesTo(ctx.device, 32603).length, 1, 'the group written once');
+});
+
+test('r2-m7 a command whose turn comes 60 s after its click is never sent', async (t) => {
+  const ctx = await setup({ config: { ...ALLOW, heating_circuits: 5 } });
+  t.after(ctx.stop);
+  for (let n = 0; n < 5; n += 1) ctx.device.set('holding', 32603 + 50 * n, 2);
+  ctx.device.delay = 1400;
+  const acks = [1, 2, 3, 4, 5].map((n) => ctx.fire(`circuit-${n}-mode`, 'continuous'));
+  const late = ctx.fire('dhw-1-setpoint', 50);
+  await ctx.advance(110 * SECOND, 100);
+  await Promise.all([...acks, late]);
+  assert.ok(ctx.app.queue.length === 0 && !ctx.app.worker, 'the queue ran out');
+  assert.equal(writesTo(ctx.device, 32000).length, 0, 'its turn came too late');
+  assert.equal(holding(ctx, 32000), 480);
+});
+
+test('r2-m7 a poll cut by a timeout, a stop resent in between: the poll read before is not applied', async (t) => {
+  const ctx = await setup();
+  t.after(ctx.stop);
+  ctx.device.ignoreWrites = true;
+  await ctx.press('circuit-1-mode', 'off');
+  ctx.device.ignoreWrites = false;
+  ctx.device.silent.add(1900); // the buffer, read last: the poll waits 2 s for it
+  await ctx.advance(23 * SECOND, 100);
+  ctx.app.tick();
+  // The check at 30 s waits for the line, takes it when the poll's session closes, sends the stop.
+  await ctx.advance(5 * SECOND, 20);
+  assert.equal(holding(ctx, 32603), 3);
+  assert.equal(ctx.state('circuit-1-mode').text, 'off', 'never the mode read before the resend');
+});
+
+test('r2 a heating mode without an answer: the next checks of the stop go without it', async (t) => {
+  const store = memoryStore();
+  const ctx = await setup({ config: { ...CFG, poll_interval: 3600 }, store });
+  t.after(ctx.stop);
+  ctx.device.ignoreWrites = true;
+  ctx.device.silent.add(32608);
+  await ctx.press('circuit-1-mode', 'off');
+  ctx.device.ignoreWrites = false;
+  await ctx.advance(2 * MINUTE, 200);
+  assert.equal(holding(ctx, 32603), 3);
+  assert.deepEqual(store.data.stops, [], 'confirmed by a check');
 });

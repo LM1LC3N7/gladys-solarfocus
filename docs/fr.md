@@ -123,7 +123,7 @@ mode appliqué (registre 502) est « toujours arrêté ». Pendant 3 s, l’arr�
 250 ms (les écritures se répètent sans effet de bord) quand la connexion est refusée ou coupée, qu’une
 réponse manque ou est fausse, que la régulation répond une exception Modbus autre que 1 à 3 (occupée,
 défaillance : rien appliqué), ou qu’un registre du circuit a été refusé et que la relecture le montre ;
-ces 3 s comptent depuis le début de son tour (un arrêt en file derrière un autre les a toutes). Gladys
+une fois le groupe acquitté, seule la relecture est reprise ; ces 3 s comptent depuis le début de son tour (un arrêt en file derrière un autre les a toutes). Gladys
 a sa réponse en 3,5 s au plus. La garde est dans `/data` avant la première écriture.
 
 Un arrêt non confirmé est gardé dans `/data` avec les valeurs lues avant lui. L’intégration vérifie la
@@ -146,8 +146,9 @@ Après ces 3 renvois, la régulation est relue toutes les 5 minutes, sans écrir
 Si la configuration désigne une autre régulation (nouvelle adresse, autre appareil), la garde d’un
 arrêt de l’ancienne est mise de côté : plus rien n’est envoyé ni lu à son adresse, le statut l’affiche
 (« Arrêt non confirmé sur une régulation qui n’est plus configurée »), et elle reprend si cette
-régulation est de nouveau configurée. Avant que la configuration soit lue (au redémarrage), elle est
-vérifiée comme les autres.
+régulation est de nouveau configurée. Cette mise de côté est gardée dans `/data` : au redémarrage,
+avant même de lire la configuration, une garde mise de côté n’est ni lue ni écrite ; seules les gardes
+actives sont vérifiées.
 
 Une vérification n’interrompt jamais une commande : elle attend derrière les commandes (plus récentes
 qu’elle) et n’écrit jamais par-dessus ; un nouveau clic sur un arrêt interrompt une vérification et est

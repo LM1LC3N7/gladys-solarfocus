@@ -140,6 +140,8 @@ function normalizeStop(raw, now) {
       ? Math.min(TIMINGS.stopReasserts, Math.max(0, raw.reasserts))
       : 0,
     sticky: raw.sticky === true,
+    // Put aside: its controller is no longer the configured one (neither read nor written).
+    dormant: raw.dormant === true,
   };
 }
 

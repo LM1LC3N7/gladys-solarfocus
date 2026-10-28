@@ -274,7 +274,6 @@ export class SolarfocusApp {
   }
 
   /** The stops not confirmed, in /data. */
-  /** The stops not confirmed, in /data. */
   persistStops() {
     const stops = [];
     for (const g of this.stopGuards.values()) {
@@ -285,6 +284,7 @@ export class SolarfocusApp {
         written: g.written,
         reasserts: g.reasserts,
         sticky: g.sticky,
+        dormant: g.dormant,
         before: g.before.slice(0, 3),
       });
     }
@@ -297,14 +297,14 @@ export class SolarfocusApp {
     if (this.started) this.updateStatus().catch(() => {});
   }
 
-  /** The heating mode (32608) last read on circuit `n` of `target`: 0-2, 'absent' or undefined. */
-  /** Keeps the heating modes read (and those the firmware has not) for the stops. */
   /**
    * At the start of the container, before the configuration is read: the
    * stops kept in /data (not confirmed before the restart) are checked at
    * once on the controller they were sent to, and sent again unless it shows
    * the stop or another value set there meanwhile; then checked until
-   * confirmed or lifted (never by the time).
+   * confirmed or lifted (never by the time). A guard put aside (its
+   * controller no longer configured, kept so in /data) is neither read nor
+   * written.
    */
   async boot() {
     await this.loadMemory();
@@ -321,9 +321,15 @@ export class SolarfocusApp {
         written: kept.written,
         reasserts: kept.reasserts,
         sticky: kept.sticky,
+        dormant: kept.dormant,
         // The controller had the time to apply it: no delay before the check.
         sentAt: undefined,
       });
+      if (guard.dormant) {
+        // Put aside for a controller no longer configured: neither read nor written until
+        // a configuration names it again.
+        continue;
+      }
       this.logger.warn(
         `Solarfocus: a stop kept in /data (register ${kept.register}) is checked again after the restart`,
       );
@@ -373,7 +379,7 @@ export class SolarfocusApp {
     this.badge = undefined;
     this.lastStatus = undefined;
     this.publisher.start();
-    this.wakeGuards();
+    this.sortGuards();
     if (!this.config.address) {
       // The device already created is shown unreachable.
       await this.publishAll();
@@ -927,7 +933,6 @@ export class SolarfocusApp {
   }
 
   /** A failed read: the delay before the next one. */
-  /** A failed read: the delay before the next one. */
   failed(err) {
     const u = this.unit;
     const wait = Math.max(
@@ -945,7 +950,6 @@ export class SolarfocusApp {
     return wait;
   }
 
-  /** The connection status of the configuration screen. */
   /** The connection status of the configuration screen. */
   status() {
     const u = this.unit;
@@ -1671,12 +1675,13 @@ export class SolarfocusApp {
   /**
    * The heating mode of a circuit stopped (32608, § 6.2.3 writes it too):
    * read now, after the mode, and written back as it is; nothing when this
-   * firmware has none or it is refused. Without an answer (the session is
-   * lost), the next tries of this stop (`holder`) go without it.
+   * firmware has none or it is refused. Without an answer the session is
+   * lost and the try ends: a click then only reads back (the group was
+   * acknowledged), a check reads first at its next turn.
    */
-  async rewriteHeatingMode(session, plan, holder) {
+  async rewriteHeatingMode(session, plan) {
     const { command } = plan;
-    if (command.kind !== 'circuitMode' || holder.skipHeatingMode) return;
+    if (command.kind !== 'circuitMode') return;
     const block = command.blocks.find((b) => b.optional);
     if (this.absent.has(block.key)) return;
     try {
@@ -1690,8 +1695,7 @@ export class SolarfocusApp {
         `Solarfocus: ${plan.role}: heating mode not written back (${errorReason(err)})`,
       );
       if (err.kind !== ERROR_KINDS.REFUSED) {
-        // The session is lost with it: the next tries of this stop go without it.
-        holder.skipHeatingMode = true;
+        // The session is lost with it: the try ends (a click then only reads back).
         throw err;
       }
     }
@@ -1732,14 +1736,29 @@ export class SolarfocusApp {
     return target ? this.stopGuards.get(guardKey(target, register)) : undefined;
   }
 
-  /** The guards of the controller of the configuration, put aside before, are checked again. */
-  wakeGuards() {
+  /**
+   * Once a configuration is read: the guards of another controller are put
+   * aside at once (kept so in /data: a restart neither reads nor writes
+   * them), those of the configured controller put aside before are checked
+   * again.
+   */
+  sortGuards() {
     for (const guard of this.stopGuards.values()) {
-      if (guard.dormant && this.mayWrite(guard.target)) {
-        guard.dormant = false;
-        this.armStopCheck(guard.key, 0);
+      if (this.mayWrite(guard.target)) {
+        if (guard.dormant) {
+          guard.dormant = false;
+          this.armStopCheck(guard.key, 0);
+        }
+      } else if (!guard.dormant) {
+        guard.dormant = true;
+        if (guard.timer) this.timers.clearTimeout(guard.timer);
+        guard.timer = undefined;
+        this.logger.warn(
+          `Solarfocus: a stop on ${addressKey(guard.target)}, not the configured controller, is no longer checked nor sent`,
+        );
       }
     }
+    this.persistStops();
   }
 
   /**
@@ -1915,6 +1934,11 @@ export class SolarfocusApp {
     let values;
     const attempt = async (session) => {
       const timeoutMs = Math.max(250, Math.min(TIMINGS.requestTimeout, retryUntil - this.mono()));
+      if (state.groupAcked) {
+        // The group was acknowledged: only its read back is tried again.
+        ({ value: back, values } = await this.readStop(session, plan, { timeoutMs }));
+        return;
+      }
       const { refusals } = await this.writeStop(session, plan, {
         timeoutMs,
         beforeSend: () => {
@@ -1929,7 +1953,8 @@ export class SolarfocusApp {
         },
       });
       state.groupWritten = true;
-      await this.rewriteHeatingMode(session, plan, job);
+      state.groupAcked = refusals === 0;
+      await this.rewriteHeatingMode(session, plan);
       ({ value: back, values } = await this.readStop(session, plan, {
         timeoutMs: TIMINGS.requestTimeout,
       }));
@@ -2028,14 +2053,8 @@ export class SolarfocusApp {
   async runCheck(key) {
     const guard = this.stopGuards.get(key);
     if (!guard) return;
-    if (!this.mayWrite(guard.target)) {
-      if (!guard.dormant) {
-        guard.dormant = true;
-        this.logger.warn(
-          `Solarfocus: a stop on ${addressKey(guard.target)}, not the configured controller, is no longer checked nor sent`,
-        );
-        this.updateStatus().catch(() => {});
-      }
+    if (guard.dormant || !this.mayWrite(guard.target)) {
+      this.sortGuards();
       return;
     }
     if (this.checkMustYield() || this.checking !== undefined) {
@@ -2082,7 +2101,7 @@ export class SolarfocusApp {
               if (resend) guard.reasserts += 1;
             },
           });
-          await this.rewriteHeatingMode(session, plan, guard);
+          await this.rewriteHeatingMode(session, plan);
           const back = await this.readStop(session, plan);
           outcome.back = back.value;
           outcome.values = back.values;
@@ -2107,14 +2126,13 @@ export class SolarfocusApp {
     } else {
       this.persistStops();
       if (outcome.written) this.followUp();
-      this.armStopCheck(key);
+      if (!guard.dormant) this.armStopCheck(key);
     }
     if (sameTarget(guard.target, this.target()) && outcome.values) {
       this.noteValues(outcome.values);
     }
   }
 
-  /** The guard of a stop of `register` (created when none runs for this target). */
   /** The guard of the stop of `plan` on `target` (created when none runs). */
   ensureStopGuard(plan, target) {
     const register = plan.command.register;

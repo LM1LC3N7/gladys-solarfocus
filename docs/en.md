@@ -113,7 +113,8 @@ is confirmed only when the read back shows mode 3, flow setpoint 0 and cooling 0
 the mode applied (register 502) is "always off". For 3 s, the stop is tried again every 250 ms (the
 writes repeat without side effects) when the connection is refused or closed, an answer is missing or
 wrong, the controller answers a Modbus exception other than 1 to 3 (busy, failure: nothing applied),
-or a register of the circuit was refused and the read back shows it; those 3 s count from the start of
+or a register of the circuit was refused and the read back shows it; once the group was
+acknowledged, only its read back is tried again; those 3 s count from the start of
 its turn (a stop queued behind another one has them all). Gladys gets its answer within 3.5 s. The
 guard is in `/data` before the first write.
 
@@ -136,7 +137,8 @@ the status shows "Stop not confirmed" until the stop shows or the guard is lifte
 When the configuration names another controller (a new address, another device), the guard of a stop
 of the former one is put aside: nothing more is sent to nor read at its address, the status shows it
 ("Stop not confirmed on a controller no longer configured"), and it resumes if that controller is
-configured again. Before the configuration is read (at a restart), it is checked like the others.
+configured again. Being put aside is kept in `/data`: at a restart, even before the configuration is
+read, a guard put aside is neither read nor written; only the active guards are checked.
 
 A check never interrupts a command: it waits behind the commands (newer than it) and never writes over
 them; a new click on a stop interrupts a check and is written then read back like a first click. After

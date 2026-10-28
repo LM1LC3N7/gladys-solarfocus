@@ -34,7 +34,12 @@ to date at the end of every milestone.
       (m2); reasons translated (m3); readable names in the status (m4); the
       guard in /data before the first write (m5). Tests named `r1-…`; the
       reviewer's scenarios S1-S13 pass.
-- [ ] **Review r2**.
+- [x] **Review r2** (REFUSÉ, 2026-10-28): fixed in "Fix r2 review": a guard put
+      aside is kept so in /data and neither read nor written at a restart (I7);
+      after an acknowledged group a click only reads back (m6); tests for
+      `wakeGuards` (now `sortGuards`), the 60 s cap and the stale read after a
+      check (m7); duplicate JSDoc removed (m8).
+- [ ] **Review r3**.
 - [ ] **Milestone 2 — real controller**: run against a real eco manager-touch
       (see "To check").
 - [ ] **Milestone 3 — more**: energy counters of the vampair (2310-2328, int32
@@ -117,8 +122,8 @@ to date at the end of every milestone.
   32603 = the mode (the mode last: a group cut short changes nothing), read
   back as mode, flow setpoint 0 and cooling 0; a stop as 32603 = 3 first,
   then 32600 = 0, 32602 = 0, then 32608 read at that moment and written back
-  as it is (nothing when refused or without an answer: the next tries go
-  without it), confirmed only by mode 3, flow setpoint 0 and cooling 0 read
+  as it is (nothing when refused; without an answer the try ends and a
+  click then only reads back), confirmed only by mode 3, flow setpoint 0 and cooling 0 read
   back (else PARTIAL: written again). The integration never writes a flow
   setpoint (the document: no timeout, and in cooling the dew point
   monitoring of the controller is off) nor cooling; a mode change is refused
@@ -151,10 +156,11 @@ to date at the end of every milestone.
 - **Mutants left alive (equivalent, layered checks)**: the open-channel test
   of `temperature()` (130/270/350 °C are also above the plausible 120 °C), the
   "never sooner" clamp of `schedule` (every caller already waits the
-  interval, `firstWait` or the due time), `startedAt <= lastSentAt` (the line
-  lock keeps writes out of a read). 31 other mutants of the guards are killed
-  by a test (scratchpad script of the lot 18 session; r1: 35 mutants, all
-  killed but the three above).
+  interval, `firstWait` or the due time). `startedAt <= lastSentAt` is no
+  longer equivalent since a poll reopens a connection after a timeout (a
+  check may write in between): tested (review r2). Every other mutant of
+  the guards is killed by a test (scratchpad scripts of the lot 18 session:
+  35 after r1, 8 more after r2).
 - **Identity**: no serial or version register over Modbus: the device id is
   the integration's; another device at the same address is not detected
   (documented). `save()` in /data does not gate the commands: no command guard
@@ -166,8 +172,10 @@ to date at the end of every milestone.
 - **Guards of another controller** (review r1): keyed by controller and
   register; once a configuration names another controller, a guard of the
   former one is put aside (no connection, no write, shown in the status) and
-  resumes if it is configured again; before the configuration is read (a
-  restart), every guard is checked.
+  resumes if it is configured again. Being put aside is kept in /data
+  (review r2): a restart, before the configuration is read, neither reads
+  nor writes such a guard; only the active ones are checked. A click whose
+  group was acknowledged only reads back on its next tries.
 - **Scenes** (review r1): a command starts within 15 s of the start of its
   turn and 60 s of its arrival.
 - No `keywords` or `countries` in the manifest (AT, DE would fit; left out
